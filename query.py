@@ -162,25 +162,49 @@ def search_text(q: str, field: str = "body", top_k: int = 10) -> SearchResult:
     })
 
 
-def search_text_multi(q: str, top_k: int = 10) -> SearchResult:
-    """Blended multi-field FTS — rewards docs relevant in multiple fields.
-    The Bird Search dataset's schema includes three text fields: bird_name, intro, and body. 
-    We can search all of these at the same time (say, to find birds with certain names and also mention certain behaviors in the body) 
-    by including multiple text signals in the score_by list.
+_MULTI_FIELDS = ("bird_name", "intro", "body")
 
-    score_by accepts a list of per-field text signals and the server combines
-    them into one per-doc relevance score. Same BM25 token-OR semantics per
-    field; for phrase semantics see :func:`search_text_phrase` with
+
+def search_text_multi(
+    queries: str | dict[str, str], top_k: int = 10
+) -> SearchResult:
+    """Blended multi-field FTS — rewards docs relevant in multiple fields.
+
+    Two call shapes:
+
+    - **``str``** — broadcast the same query to all three text fields
+      (``bird_name``, ``intro``, ``body``). Server combines per-field BM25
+      scores into one per-doc relevance score; documents that match in more
+      fields rank higher.
+    - **``dict[str, str]``** — per-field queries. Each ``(field, query)``
+      pair becomes its own ``text`` clause; empty / whitespace-only values
+      are skipped. Lets you combine signals like
+      ``{"bird_name": "swallow", "body": "in mountains"}`` without forcing
+      one search string to satisfy every field.
+
+    For phrase semantics see :func:`search_text_phrase` with
     ``field='multi'``.
     """
+    if isinstance(queries, str):
+        clauses = [
+            {"type": "text", "field": f, "query": queries}
+            for f in _MULTI_FIELDS
+        ]
+    else:
+        clauses = [
+            {"type": "text", "field": f, "query": q.strip()}
+            for f, q in queries.items()
+            if q and q.strip()
+        ]
+        if not clauses:
+            raise ValueError(
+                "search_text_multi: dict form needs at least one non-empty query"
+            )
+
     return _execute({
         "namespace": NAMESPACE,
         "top_k": top_k,
-        "score_by": [
-            {"type": "text", "field": "bird_name", "query": q},
-            {"type": "text", "field": "intro", "query": q},
-            {"type": "text", "field": "body", "query": q},
-        ],
+        "score_by": clauses,
         "include_fields": INCLUDE_FIELDS,
     })
 

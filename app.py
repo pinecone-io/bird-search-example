@@ -1,21 +1,22 @@
 """Streamlit UI for Bird Search v2.
 
 Four search modes over one Pinecone preview FTS index:
-  - Text FTS: BM25 token-OR over ``bird_name`` / ``intro`` / ``body``
-    (per-field or blended multi-field), with an opt-in "exact phrase" toggle
-    that routes through Lucene ``query_string``.
+  - Text FTS: BM25 token-OR over ``bird_name`` / ``intro`` / ``body``, either
+    per-field or blended (``multi``). The blended mode also supports
+    different queries per field (e.g. bird_name=swallow + body=mountains).
+    An "exact phrase" toggle routes the query through Lucene ``query_string``
+    when adjacency matters.
   - Visual: typed description embedded via Gemini Embedding 2, scored against
-    each bird's image vector.
-  - Combined: dense-vector ranking on the image embedding, then a client-side
-    substring filter on ``body`` for every required term. (Will switch to a
-    server-side ``$matches_all`` hard filter once that operator ships in
-    preview — see ``query.search_filter_visual``.)
-  - Boolean: raw Lucene ``query_string`` — the user types boolean / phrase /
-    boost / slop / phrase-prefix expressions directly.
+    each bird's primary image vector in the same multimodal space.
+  - Combined: server-side ``$match_all`` filter on ``body`` (every required
+    term must appear) plus dense-vector ranking on the image embedding —
+    one round trip. Falls back to a client-side substring filter if the
+    backend rejects ``$match_all``.
+  - Boolean: raw Lucene ``query_string`` — boolean operators, required /
+    excluded terms, term boosts, phrase slop, phrase prefixes, cross-field.
 
-Each tab also renders a "what we sent to Pinecone" code block under the
-results so demo viewers can see the actual ``documents.search(...)`` call.
-
+Each tab renders the actual ``documents.search(...)`` call beneath the
+results so viewers can see exactly what hit Pinecone.
 """
 
 from __future__ import annotations
@@ -60,39 +61,135 @@ METADATA = load_metadata()
 
 # ---------------------------------------------------------------------------
 # Query-word highlighter.
+#
+# Highlight tokens are derived from the structured request we sent to
+# Pinecone (``SearchResult.kwargs``) rather than the raw user input string,
+# so per-field clauses light up only their own field — e.g.
+# ``bird_name:(swallow*) OR body:(eagle)`` highlights ``swallow`` in the
+# title and ``eagle`` in the body, not vice versa. Filter operators
+# ($match_all / $match_phrase / $match_any) contribute tokens too.
 # ---------------------------------------------------------------------------
 
 _WORD_RE = re.compile(r"([A-Za-z][A-Za-z\-']*)")
-# Words to ignore when extracting highlight terms from a Lucene-flavored query.
-# Otherwise "body:(machine AND learning)" would also light up "and" everywhere.
 _LUCENE_OPERATORS = {"and", "or", "not", "to"}
+# ``field:(...)`` or ``field:value`` scoped clause inside a query_string.
+_FIELD_CLAUSE_RE = re.compile(
+    r"(\w+):(?:\(([^)]*)\)|((?:\"[^\"]*\")|\S+))"
+)
+# Term inside a Lucene chunk. The optional sign captures ``+`` / ``-`` so
+# excluded terms can be dropped from the highlight set.
+_TERM_TOKEN_RE = re.compile(r"([+\-]?)([A-Za-z][A-Za-z\-']*)")
 
 
-def highlight_matching_words(text: str, query: str) -> str:
-    """Wrap query words (and simple stemming variants) in ``<mark>`` tags.
+def _tokens_from_lucene_chunk(chunk: str) -> set[str]:
+    """Extract positive word tokens from a Lucene chunk like
+    ``+illinois +cardinal -opinion`` or ``"northern cardinal"~3``.
 
-    Matching is case-insensitive and uses a prefix heuristic: a query word
-    highlights any body word that shares a prefix of at least 3 characters
-    (so ``peck`` lights up ``pecks``/``pecking``, matching how FTS stems on
-    the ``body`` field). Whitespace, punctuation, and paragraph breaks are
-    preserved; all text is HTML-escaped.
+    Drops excluded terms (``-foo``), boolean operators (``AND/OR/NOT/TO``)
+    and any non-alphabetic suffixes (boost ``^3``, slop ``~3``,
+    wildcard ``*``)."""
+    out: set[str] = set()
+    for sign, word in _TERM_TOKEN_RE.findall(chunk):
+        if sign == "-":
+            continue
+        wl = word.lower()
+        if wl in _LUCENE_OPERATORS or len(word) < 2:
+            continue
+        out.add(wl)
+    return out
 
-    Word extraction goes through ``_WORD_RE`` so Lucene punctuation
-    (``body:(+illinois -opinion)``, quotes, parens, ``^N`` boosts) is
-    stripped — only the actual search terms get highlighted.
 
-    Render with ``st.markdown(..., unsafe_allow_html=True)``.
-    """
-    query_words = [
-        m.group(0).lower()
-        for m in _WORD_RE.finditer(query)
-        if len(m.group(0)) >= 2 and m.group(0).lower() not in _LUCENE_OPERATORS
-    ]
-    if not query_words:
+def _tokens_for_field_from_query_string(qs: str, target_field: str) -> set[str]:
+    """Pull tokens scoped to ``target_field`` out of a raw Lucene
+    ``query_string``. Tokens written without a field prefix are unscoped
+    and contribute to every text field's highlight set."""
+    out: set[str] = set()
+    consumed: list[tuple[int, int]] = []
+    for m in _FIELD_CLAUSE_RE.finditer(qs):
+        scoped_field = m.group(1)
+        body = m.group(2) if m.group(2) is not None else (m.group(3) or "")
+        consumed.append(m.span())
+        if scoped_field == target_field:
+            out |= _tokens_from_lucene_chunk(body.strip('"'))
+
+    # Anything outside ``field:(...)`` blocks is unscoped — applies to every
+    # text field. Slice those leftover spans back out of ``qs``.
+    leftover_parts: list[str] = []
+    last = 0
+    for s, e in consumed:
+        if s > last:
+            leftover_parts.append(qs[last:s])
+        last = e
+    if last < len(qs):
+        leftover_parts.append(qs[last:])
+    leftover = " ".join(leftover_parts).strip()
+    if leftover:
+        out |= _tokens_from_lucene_chunk(leftover)
+    return out
+
+
+def _filter_tokens_for_field(filter_dict, target_field: str) -> set[str]:
+    """Walk a Pinecone ``filter`` dict for text-match operators keyed at
+    ``target_field`` and return the highlight tokens they imply."""
+    if not isinstance(filter_dict, dict):
+        return set()
+    out: set[str] = set()
+    for k, v in filter_dict.items():
+        if k in ("$and", "$or") and isinstance(v, list):
+            for child in v:
+                out |= _filter_tokens_for_field(child, target_field)
+            continue
+        if k == "$not":
+            # Excluded clause — don't highlight anything from it.
+            continue
+        if k == target_field and isinstance(v, dict):
+            for op in ("$match_phrase", "$match_all", "$match_any"):
+                if op in v and isinstance(v[op], str):
+                    out |= _tokens_from_lucene_chunk(v[op])
+    return out
+
+
+def tokens_for_field(result, field: str) -> set[str]:
+    """Tokens that should highlight inside the document's ``field`` text,
+    based on the ``score_by`` clauses + ``filter`` operators in the call
+    we just made. Returns an empty set when no text-shaped clause targets
+    this field (e.g. a pure ``dense_vector`` search)."""
+    if result is None:
+        return set()
+    kwargs = getattr(result, "kwargs", None) or {}
+    out: set[str] = set()
+
+    for clause in kwargs.get("score_by") or []:
+        ctype = clause.get("type")
+        if ctype == "text":
+            # Public-preview docs use ``fields: [...]`` (array); preprod
+            # still accepts the older singular ``field``. Honor both.
+            scoped = clause.get("fields")
+            if scoped is None:
+                f = clause.get("field")
+                scoped = [f] if f else []
+            if field in scoped:
+                out |= _tokens_from_lucene_chunk(clause.get("query") or "")
+        elif ctype == "query_string":
+            qs = clause.get("query") or ""
+            out |= _tokens_for_field_from_query_string(qs, field)
+        # dense_vector / sparse_vector contribute nothing to text highlights.
+
+    out |= _filter_tokens_for_field(kwargs.get("filter"), field)
+    return out
+
+
+def _highlight_with_tokens(text: str, tokens: set[str]) -> str:
+    """Wrap any word in ``text`` whose lowercase form prefix-matches a
+    token in ``tokens``. The prefix heuristic (>= 3 char overlap) keeps
+    stemmed FTS hits visible (``peck`` lights up ``pecks``/``pecking``).
+    Whitespace and punctuation are preserved; all output is HTML-escaped.
+    Render with ``st.markdown(..., unsafe_allow_html=True)``."""
+    if not tokens:
         return html.escape(text)
 
     def is_match(word_lc: str) -> bool:
-        for q in query_words:
+        for q in tokens:
             if q == word_lc:
                 return True
             shorter, longer = (q, word_lc) if len(q) <= len(word_lc) else (word_lc, q)
@@ -100,24 +197,27 @@ def highlight_matching_words(text: str, query: str) -> str:
                 return True
         return False
 
-    def replace(m: re.Match[str]) -> str:
-        word = m.group(0)
-        if is_match(word.lower()):
-            return f"<mark>{html.escape(word)}</mark>"
-        return html.escape(word)
-
-    # Escape non-word spans separately so we don't double-escape the matched
-    # words (which already get escaped inside ``replace``).
     parts: list[str] = []
     last = 0
     for m in _WORD_RE.finditer(text):
         if m.start() > last:
             parts.append(html.escape(text[last : m.start()]))
-        parts.append(replace(m))
+        word = m.group(0)
+        if is_match(word.lower()):
+            parts.append(f"<mark>{html.escape(word)}</mark>")
+        else:
+            parts.append(html.escape(word))
         last = m.end()
     if last < len(text):
         parts.append(html.escape(text[last:]))
     return "".join(parts)
+
+
+def highlight_for_field(text: str, field: str, result) -> str:
+    """Highlight a document's ``field`` text using only the tokens
+    targeted at that field by the search call. Returns HTML-escaped
+    output safe to render with ``unsafe_allow_html=True``."""
+    return _highlight_with_tokens(text, tokens_for_field(result, field))
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +252,7 @@ def _render_call_snippet(response) -> None:
             st.code(extra, language="python")
 
 
-def render_results(response, highlight_query: str = "") -> None:
+def render_results(response) -> None:
     # Call snippet first — clickable toggle above the results so demo
     # viewers can see what was sent before they scroll the matches.
     _render_call_snippet(response)
@@ -172,9 +272,12 @@ def render_results(response, highlight_query: str = "") -> None:
                 f'<span class="bird-card-score">score {score:.3f}</span>'
                 if score is not None else ""
             )
+            # Highlight bird_name only if the search actually scored on
+            # bird_name (e.g. multi-field with bird_name="swallow").
+            title_html = highlight_for_field(bird_name, "bird_name", response)
             st.markdown(
                 f'<div class="bird-card-header">'
-                f'<span class="bird-card-title">{html.escape(bird_name)}</span>'
+                f'<span class="bird-card-title">{title_html}</span>'
                 f'{score_badge}'
                 f'</div>',
                 unsafe_allow_html=True,
@@ -190,20 +293,19 @@ def render_results(response, highlight_query: str = "") -> None:
             with cols[1]:
                 intro = doc.get("intro") or ""
                 body = doc.get("body") or ""
-                has_highlight = bool(highlight_query.strip())
 
                 if intro:
-                    if has_highlight:
-                        st.markdown(highlight_matching_words(intro, highlight_query), unsafe_allow_html=True)
-                    else:
-                        st.markdown(intro)
+                    st.markdown(
+                        highlight_for_field(intro, "intro", response),
+                        unsafe_allow_html=True,
+                    )
 
                 if body:
                     with st.expander("Full article body"):
-                        if has_highlight:
-                            st.markdown(highlight_matching_words(body, highlight_query), unsafe_allow_html=True)
-                        else:
-                            st.markdown(body)
+                        st.markdown(
+                            highlight_for_field(body, "body", response),
+                            unsafe_allow_html=True,
+                        )
 
 
 # ---------------------------------------------------------------------------
@@ -356,13 +458,20 @@ tab_text, tab_visual, tab_combined, tab_boolean, tab_about = st.tabs(
 # --- Tab 1: Text FTS ------------------------------------------------------
 with tab_text:
     st.header("Text FTS")
-    st.write(
-        "Keyword search over one field, or blended across all three. "
-        "`multi` rewards birds whose article is relevant in `bird_name`, "
-        "`intro`, and `body` together. Toggle **Match as exact phrase** for "
-        "queries whose meaning hinges on word adjacency (e.g. `state bird "
-        "of seven` — token-OR ranks the cardinal off the page; phrase mode "
-        "lands it at #1)."
+    st.markdown(
+        "BM25 keyword scoring against your chosen field.\n\n"
+        "- **Pick a field** to scope the search: `body` (article prose), "
+        "`intro` (Wikipedia lede), or `bird_name` (species name).\n"
+        "- **`multi`** searches all three at once — and lets you write a "
+        "*different* query per field, e.g. `bird_name=swallow` + "
+        "`body=in mountains`. The server combines per-field scores into "
+        "one rank, so birds that match in more fields rise.\n"
+        "- **Phrase OFF** (default) is BM25 token-OR: each word scores "
+        "independently. Best for queries with rare, distinctive tokens "
+        "(`Mormon crickets`).\n"
+        "- **Phrase ON** wraps your query in quotes and routes through "
+        "Lucene `query_string`, requiring word adjacency. Use it when "
+        "meaning lives in word order (`state bird of seven`)."
     )
 
     _example_buttons("text", [
@@ -373,8 +482,19 @@ with tab_text:
                       "text_phrase": False},
         },
         {
-            "label": "Miracle of the Gulls · multi",
+            "label": "Miracle of the Gulls · multi (broadcast)",
             "state": {"text_query": "Miracle of the Gulls",
+                      "multi_bird_name": "Miracle of the Gulls",
+                      "multi_intro": "Miracle of the Gulls",
+                      "multi_body": "Miracle of the Gulls",
+                      "text_field": "multi",
+                      "text_phrase": False},
+        },
+        {
+            "label": "swallow + mountains · multi (per-field)",
+            "state": {"multi_bird_name": "swallow",
+                      "multi_intro": "",
+                      "multi_body": "in mountains",
                       "text_field": "multi",
                       "text_phrase": False},
         },
@@ -407,33 +527,79 @@ with tab_text:
             "Off (default): Pinecone `type: \"text\"` — BM25 token-OR. Each "
             "word scores independently.\n\n"
             "On: routes through `type: \"query_string\"` with the query "
-            "wrapped in quotes (`field:(\"…\")`), so adjacency is required."
+            "wrapped in quotes (`field:(\"…\")`), so adjacency is required.\n\n"
+            "Phrase mode uses the single Query input below regardless of "
+            "field choice (and OR's across all three fields when "
+            "field=multi)."
         ),
     )
-    query = st.text_input(
-        "Query",
-        placeholder="e.g. bright red wings pecks wood",
-        key="text_query",
-    )
+
+    # Multi mode (non-phrase) opens three per-field inputs so the user can
+    # combine signals like bird_name=swallow + body=in mountains. Every
+    # other mode uses the single Query input.
+    in_per_field_multi = field_choice == "multi" and not phrase_match
+    if in_per_field_multi:
+        st.markdown("**Per-field queries** — leave any field empty to skip it.")
+        cols = st.columns(3)
+        cols[0].text_input(
+            "bird_name", key="multi_bird_name",
+            placeholder="e.g. swallow",
+        )
+        cols[1].text_input(
+            "intro", key="multi_intro",
+            placeholder="(optional)",
+        )
+        cols[2].text_input(
+            "body", key="multi_body",
+            placeholder="e.g. in mountains",
+        )
+        query = ""  # not used in this branch
+    else:
+        query = st.text_input(
+            "Query",
+            placeholder="e.g. bright red wings pecks wood",
+            key="text_query",
+        )
+
     if st.button("Search", key="text_btn", type="primary") or _consume_auto_run("text"):
-        if query.strip():
-            with st.spinner("Searching…"):
-                if phrase_match:
+        if phrase_match:
+            if query.strip():
+                with st.spinner("Searching…"):
                     response = search_text_phrase(query, field=field_choice)
-                elif field_choice == "multi":
-                    response = search_text_multi(query)
-                else:
-                    response = search_text(query, field=field_choice)
-            render_results(response, highlight_query=query)
+                render_results(response)
+            else:
+                st.warning("Enter a query.")
+        elif in_per_field_multi:
+            multi_queries = {
+                "bird_name": st.session_state.get("multi_bird_name", ""),
+                "intro": st.session_state.get("multi_intro", ""),
+                "body": st.session_state.get("multi_body", ""),
+            }
+            non_empty = {f: q for f, q in multi_queries.items() if q.strip()}
+            if non_empty:
+                with st.spinner("Searching…"):
+                    response = search_text_multi(non_empty)
+                render_results(response)
+            else:
+                st.warning("Fill at least one of bird_name / intro / body.")
         else:
-            st.warning("Enter a query.")
+            if query.strip():
+                with st.spinner("Searching…"):
+                    response = search_text(query, field=field_choice)
+                render_results(response)
+            else:
+                st.warning("Enter a query.")
 
 # --- Tab 2: Visual --------------------------------------------------------
 with tab_visual:
     st.header("Visual")
-    st.write(
-        "Describe what the bird looks like. Your description is embedded "
-        "with Gemini Embedding 2 and matched against each bird's photo."
+    st.markdown(
+        "Cross-modal search — type **what the bird looks like** in plain "
+        "English. Your text is embedded with Gemini Embedding 2 and scored "
+        "against each bird's primary photo embedding (same multimodal "
+        "space). No keywords required: phrasing like *clown beak* or "
+        "*roundest birds ever that are red* lands on the right photos even "
+        "when the article never uses those words."
     )
 
     _example_buttons("visual", [
@@ -471,13 +637,21 @@ with tab_visual:
 # --- Tab 3: Combined ------------------------------------------------------
 with tab_combined:
     st.header("Combined")
-    st.write(
-        "Rank birds by visual similarity to your description, then keep only "
-        "those whose article `body` contains every required term "
-        "(case-insensitive substring match). Today this is post-filtered "
-        "client-side over the top visual neighbours; once Pinecone's "
-        "`$matches_all` operator ships in preview it will become a server-side "
-        "hard filter."
+    st.markdown(
+        "The headline cross-modal query — **filter by text, rerank by "
+        "image, in one round trip**. Sent as `filter={\"body\": "
+        "{\"$match_all\": \"…\"}}` (server-side hard filter; every required "
+        "term must appear in the article body) plus a `dense_vector` "
+        "`score_by` clause on `image_embedding` (Gemini-2 ranks each "
+        "survivor by visual similarity to your description). The "
+        "demo flip: visual-only `red bird with black wings` lands on a "
+        "scarlet tanager; add `illinois` as a required term and the cardinal "
+        "/ red-winged blackbird take over."
+    )
+    st.caption(
+        "If the backend hasn't picked up `$match_all` yet, the helper falls "
+        "back to a wide dense fetch + Python-side substring filter — the "
+        "code block under the results is honest about which path ran."
     )
 
     _example_buttons("combined", [
@@ -516,7 +690,7 @@ with tab_combined:
                     filter_terms=filter_terms,
                     visual_q=visual_q,
                 )
-            render_results(response, highlight_query=filter_raw)
+            render_results(response)
         else:
             st.warning("Enter at least one filter term and an appearance description.")
 
@@ -524,11 +698,14 @@ with tab_combined:
 with tab_boolean:
     st.header("Boolean / Lucene")
     st.markdown(
-        "Drive Pinecone's `query_string` mode directly. Supports "
-        "`AND` / `OR` / `NOT` / `+required` / `-excluded` / `\"phrase\"` / "
-        "`term^N` (boost) / `\"phrase\"~N` (slop) / `\"machine lea\"*` "
-        "(phrase prefix). Field names available on this index: "
-        "`bird_name`, `intro`, `body`."
+        "Write Lucene `query_string` directly when the Text FTS tab can't "
+        "express what you want. Reach for this tab for **boosts** "
+        "(`eagle^3` weights eagle 3× over peers), **phrase slop** "
+        "(`\"northern cardinal\"~3` allows 3 tokens between the words), "
+        "**phrase prefixes** (`\"james w\"*`), **required / excluded** "
+        "terms (`+illinois -opinion`), and **cross-field clauses** "
+        "(`bird_name:(swallow*) OR body:(swallow)`). Field names on this "
+        "index: `bird_name`, `intro`, `body`."
     )
 
     _example_buttons("boolean", [
@@ -563,7 +740,7 @@ with tab_boolean:
         if boolean_q.strip():
             with st.spinner("Searching…"):
                 response = search_query_string(boolean_q)
-            render_results(response, highlight_query=boolean_q)
+            render_results(response)
         else:
             st.warning("Enter a Lucene query_string.")
 
@@ -572,39 +749,33 @@ with tab_about:
     st.header("About")
     st.markdown(
         """
-**Text FTS** — BM25 keyword search over the three article fields
-(`bird_name`, `intro`, `body`) using Pinecone's preview `type: "text"`
-scoring. Pick a single field for precise matching, or `multi` to blend
-all three and reward documents relevant in more than one place. Toggle
-**Match as exact phrase** to flip to `type: "query_string"` with the query
-wrapped in quotes — needed for queries whose meaning lives in adjacency
-(e.g. `state bird of seven`).
+### How to construct a new query
 
-- Example (token-OR, body): `bright red wings pecks wood` → woodpeckers.
-- Example (phrase, body): `state bird of seven` → northern cardinal.
-- Example (bird_name): `wren` → wrens.
+1. **Pick the tab that matches your signal.**
+   - Words you'd find *in the article*? → **Text FTS** or **Boolean**.
+   - Words describing what the *bird looks like*? → **Visual**.
+   - Both at once? → **Combined**.
+2. **Write the query**, using the example buttons as templates.
+3. **Open "What we sent to Pinecone"** above the results to see the
+   exact `documents.search(...)` call. Every example in the demo is
+   reproducible from that snippet.
 
-**Visual** — Describe what the bird looks like in plain text. The
-description is embedded with Gemini Embedding 2 and scored against each
-bird's primary photo embedding (same multimodal space).
+### Tab quick reference
 
-- Example: `roundest birds ever that are red` → visually round red birds,
-  even when the article doesn't contain those exact words.
+| Tab | API shape | Pick when… | Canonical example |
+|---|---|---|---|
+| **Text FTS** | `score_by=[{"type": "text", "field": …}]` (or `query_string` when phrase ON) | You can name a token in the article. Use `multi` with per-field queries to combine signals. | `Mormon crickets` (body) → California gull |
+| **Visual** | `score_by=[{"type": "dense_vector", "field": "image_embedding"}]` | You can describe the bird's appearance but not the article's vocabulary. | `tall pink wading bird with long curved neck` → American flamingo |
+| **Combined** | `filter={"body": {"$match_all": …}}` + dense `score_by` | You need both — a hard text gate and visual rerank. | `illinois` + `red bird with black wings` → cardinal / red-winged blackbird |
+| **Boolean** | `score_by=[{"type": "query_string"}]` (raw Lucene) | You need boosts, slop, phrase prefixes, exclusions, or cross-field clauses. | `body:(eagle^3 OR hawk OR raptor)` → eagles dominate |
 
-**Combined** — Visual ranking plus a keyword guardrail on `body`. The
-visual rank picks shape and colour; the keyword filter ensures the article
-is *about* the right place / context.
+### Data and schema
 
-- Example: must-mention `illinois`, describe `red bird with black wings` →
-  Illinois-range red+black birds (cardinal, red-winged blackbird).
-
-**Boolean** — Raw Lucene `query_string`. Use for boolean operators
-(`AND`/`OR`/`NOT`), required (`+`) / excluded (`-`) terms, exact phrases
-(`"…"`), phrase slop (`"…"~N`), term boosts (`term^N`), phrase-prefix
-matches (`"machine lea"*`), and cross-field queries
-(`title:(…) OR body:(…)`).
-
-Each tab shows the actual `documents.search(...)` call under its results,
-so you can see exactly what hit Pinecone.
+~2,079 North American bird Wikipedia articles. Each doc has three text
+fields (`bird_name`, `intro`, `body`) plus one dense `image_embedding`
+(Gemini Embedding 2, 768d, multimodal text+image space). Index
+`bird-search-fts`, namespace `birds`, single Pinecone preview FTS index —
+the schema block in the top-right is the literal `SchemaBuilder` chain
+sent at create time.
         """
     )
