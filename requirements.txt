@@ -1,0 +1,9 @@
+streamlit
+pillow
+tqdm
+python-dotenv
+google-genai
+
+httpx[http2]
+msgspec
+orjson
