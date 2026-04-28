@@ -209,3 +209,7 @@ __marimo__/
 # Bird Search v2 — local Gemini embedding cache (resumable build state)
 embeddings-cache.jsonl
 internal-instructions.md
+.playwright-mcp/
+CLAUDE.md
+demo-queries.md
+example-preprod-nb.ipynb
