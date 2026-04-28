@@ -205,3 +205,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Bird Search v2 — local Gemini embedding cache (resumable build state)
+embeddings-cache.jsonl
+internal-instructions.md
