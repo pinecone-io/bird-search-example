@@ -8,18 +8,18 @@ Thin wrappers over `idx.documents.search(...)` for each of the UI tabs:
     search_query_string   raw Lucene query_string (boolean / boost / slop / …)
     search_visual         Gemini-2 text embed scored against stored image
                           embeddings (cross-modal)
-    search_filter_visual  dense visual rank + client-side body keyword guardrail
+    search_filter_visual  $match_all body filter + dense visual rerank in
+                          one Pinecone call
 
+Every helper returns a ``SearchResult`` with:
 
-Every helper returns a ``SearchResult`` with three things:
-
-- ``matches`` — list of match objects (drop-in for the previous SDK response).
+- ``matches`` — list of match objects (drop-in for the SDK response).
 - ``kwargs`` — the dict actually passed to ``documents.search(**kwargs)``.
 - ``code`` — a Python source snippet of that call, ready for ``st.code(...)``
   in the UI so demo viewers can see exactly what hit Pinecone.
-
-``search_filter_visual`` also sets ``extra_code`` describing the Python-side
-filter step (until the operator lands and we can collapse it back to one call).
+- ``extra_code`` — optional post-call Python (currently always empty;
+  reserved for any future helper that does client-side processing on top
+  of the SDK response).
 """
 
 from __future__ import annotations
@@ -162,25 +162,49 @@ def search_text(q: str, field: str = "body", top_k: int = 10) -> SearchResult:
     })
 
 
-def search_text_multi(q: str, top_k: int = 10) -> SearchResult:
-    """Blended multi-field FTS — rewards docs relevant in multiple fields.
-    The Bird Search dataset's schema includes three text fields: bird_name, intro, and body. 
-    We can search all of these at the same time (say, to find birds with certain names and also mention certain behaviors in the body) 
-    by including multiple text signals in the score_by list.
+_MULTI_FIELDS = ("bird_name", "intro", "body")
 
-    score_by accepts a list of per-field text signals and the server combines
-    them into one per-doc relevance score. Same BM25 token-OR semantics per
-    field; for phrase semantics see :func:`search_text_phrase` with
+
+def search_text_multi(
+    queries: str | dict[str, str], top_k: int = 10
+) -> SearchResult:
+    """Blended multi-field FTS — rewards docs relevant in multiple fields.
+
+    Two call shapes:
+
+    - **``str``** — broadcast the same query to all three text fields
+      (``bird_name``, ``intro``, ``body``). Server combines per-field BM25
+      scores into one per-doc relevance score; documents that match in more
+      fields rank higher.
+    - **``dict[str, str]``** — per-field queries. Each ``(field, query)``
+      pair becomes its own ``text`` clause; empty / whitespace-only values
+      are skipped. Lets you combine signals like
+      ``{"bird_name": "swallow", "body": "in mountains"}`` without forcing
+      one search string to satisfy every field.
+
+    For phrase semantics see :func:`search_text_phrase` with
     ``field='multi'``.
     """
+    if isinstance(queries, str):
+        clauses = [
+            {"type": "text", "field": f, "query": queries}
+            for f in _MULTI_FIELDS
+        ]
+    else:
+        clauses = [
+            {"type": "text", "field": f, "query": q.strip()}
+            for f, q in queries.items()
+            if q and q.strip()
+        ]
+        if not clauses:
+            raise ValueError(
+                "search_text_multi: dict form needs at least one non-empty query"
+            )
+
     return _execute({
         "namespace": NAMESPACE,
         "top_k": top_k,
-        "score_by": [
-            {"type": "text", "field": "bird_name", "query": q},
-            {"type": "text", "field": "intro", "query": q},
-            {"type": "text", "field": "body", "query": q},
-        ],
+        "score_by": clauses,
         "include_fields": INCLUDE_FIELDS,
     })
 
@@ -257,45 +281,29 @@ def search_filter_visual(
     visual_q: str,
     filter_field: str = "body",
     top_k: int = 10,
-    candidate_pool: int = 200,
 ) -> SearchResult:
-    """
-    This function handles the semantic-visual only search path, and the combined full text filter path.
+    """Compound query: require every term in ``filter_terms`` to appear in
+    ``filter_field`` (server-side ``$match_all``) and rank survivors by
+    dense-vector similarity to ``visual_q``'s Gemini-2 embedding. One
+    Pinecone call — hard filter + visual rerank.
 
-    The combined text path works kinda like a filter + dense search, where the search space is constrained
-    first by a hard filter on the text fields, and then the remaining are ranked by visual similarity to the query.
-
-    You can imagine this being pretty handy for a situation where you see a bird in a certain place, or a location,
-    and you restrict your search only to those places, using the description you saw.
-
-    
-    Compound query: require all filter_terms in a text field + rank by
-    dense-vector similarity to visual_q's Gemini-2 embedding. Example:
-    filter=["illinois"] on body + visual_q="red bird with black wings" →
-    Illinois-range birds ranked by visual similarity to that description.
-
-    **Primary path** — public-preview docs (2026-01.alpha) document a
-    ``$match_all`` filter operator that takes a space-separated string of
-    required tokens. Combined with a ``dense_vector`` score_by, that gives
-    us the intended single-call shape: server-side hard filter, dense
-    rerank.
-
-    **Fallback path** — if the primary call raises (e.g. the backend we're
-    pointed at hasn't picked up ``$match_all`` yet), we degrade to a wide
-    dense fetch and a Python-side substring filter. The returned
-    ``SearchResult.code`` reflects whichever path actually ran, and the
-    fallback also stashes the API error in ``extra_code`` so the demo UI
-    is honest about what happened.
+    Example: ``filter_terms=["illinois"]`` on ``body`` plus
+    ``visual_q="red bird with black wings"`` → Illinois-range birds
+    ranked by visual similarity to that description.
 
     Empty ``filter_terms`` short-circuits to pure visual search.
+
+    Note: there used to be a Python-side substring fallback for backends
+    that hadn't picked up ``$match_all`` yet; it was removed once preprod
+    accepted the operator. If a future backend regresses, this helper
+    will raise rather than degrade — the live tests will catch it first.
     """
     emb = embed_text(visual_q)
     required = [t.strip() for t in filter_terms if t.strip()]
     if not required:
         return search_visual(visual_q, top_k=top_k)
 
-    # ---- Primary: single-call form with $match_all ------------------------
-    primary_kwargs = {
+    return _execute({
         "namespace": NAMESPACE,
         "top_k": top_k,
         "filter": {filter_field: {"$match_all": " ".join(required)}},
@@ -303,49 +311,4 @@ def search_filter_visual(
             {"type": "dense_vector", "field": "image_embedding", "values": emb}
         ],
         "include_fields": INCLUDE_FIELDS,
-    }
-    try:
-        resp = _index().documents.search(**primary_kwargs)
-        return SearchResult(
-            matches=list(resp.matches),
-            kwargs=primary_kwargs,
-            code=_format_search_call(primary_kwargs),
-        )
-    except Exception as exc:
-        primary_error = str(exc)
-
-    # ---- Fallback: dense fetch + client-side substring filter -------------
-    fallback_kwargs = {
-        "namespace": NAMESPACE,
-        "top_k": candidate_pool,
-        "score_by": [
-            {"type": "dense_vector", "field": "image_embedding", "values": emb}
-        ],
-        "include_fields": INCLUDE_FIELDS,
-    }
-    resp = _index().documents.search(**fallback_kwargs)
-
-    required_lc = [t.lower() for t in required]
-    survivors: list[Any] = []
-    for m in resp.matches:
-        text = (m.get(filter_field) or "").lower()
-        if all(term in text for term in required_lc):
-            survivors.append(m)
-        if len(survivors) >= top_k:
-            break
-
-    extra = (
-        f"# $match_all rejected by backend: {primary_error[:160]}\n"
-        "# Falling back to wide dense fetch + Python-side substring filter.\n"
-        "survivors = [\n"
-        "    m for m in resp.matches\n"
-        f"    if all(t in (m.get({filter_field!r}) or '').lower() for t in {required_lc!r})\n"
-        f"][:{top_k}]"
-    )
-
-    return SearchResult(
-        matches=survivors,
-        kwargs=fallback_kwargs,
-        code=_format_search_call(fallback_kwargs),
-        extra_code=extra,
-    )
+    })

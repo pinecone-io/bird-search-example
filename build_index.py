@@ -11,7 +11,7 @@ Usage:
 
 Defaults:
     --sample 50            (pass a large N or 0 to ingest the full corpus)
-    --data-dir             $BIRD_DATA_DIR or ../old-code/parsed_birds
+    --data-dir             $BIRD_DATA_DIR or ./parsed_birds (in-repo)
 
 Embeddings are cached at embeddings-cache.jsonl (one row per bird, tagged
 with model + dim). Re-running resumes where a previous run stopped; pass
@@ -60,7 +60,8 @@ GEMINI_MODEL = "gemini-embedding-2"
 GEMINI_EMBED_DIMENSIONS = 768
 
 
-DEFAULT_DATA_DIR = os.environ.get("BIRD_DATA_DIR", "../old-code/parsed_birds")
+_DEFAULT_DATA_DIR_PATH = pathlib.Path(__file__).resolve().parent / "parsed_birds"
+DEFAULT_DATA_DIR = os.environ.get("BIRD_DATA_DIR", str(_DEFAULT_DATA_DIR_PATH))
 
 # -----------------------------------------------------------------------------
 # Embedding cache + concurrency

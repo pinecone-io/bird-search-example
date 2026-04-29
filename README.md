@@ -19,7 +19,7 @@ Streamlit app showcasing Pinecone's preview FTS API + Gemini Embedding 2 (multim
 
 ## Data
 
-The bird dataset (`parsed_birds/`) lives....
+The bird dataset lives at `parsed_birds/` in this repo (~58 MB, committed): `parsing_metadata.json`, `text/<slug>.txt` per bird, and `images/<slug>/<slug>_1.jpg` per bird. ~2,079 entries scraped from North American bird Wikipedia articles. Set `BIRD_DATA_DIR` to override the path if you keep the data elsewhere.
 ## Tabs
 
 - **Text FTS** — keyword and multi-field search over `bird_name` / `intro` / `body`.
