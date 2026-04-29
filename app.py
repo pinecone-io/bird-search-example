@@ -41,8 +41,9 @@ from query import (
 # Data location + metadata (loaded once at startup).
 # ---------------------------------------------------------------------------
 
+_DEFAULT_DATA_DIR = pathlib.Path(__file__).resolve().parent / "parsed_birds"
 BIRD_DATA_DIR = pathlib.Path(
-    os.environ.get("BIRD_DATA_DIR", "../old-code/parsed_birds")
+    os.environ.get("BIRD_DATA_DIR", str(_DEFAULT_DATA_DIR))
 ).expanduser()
 IMAGES_DIR = BIRD_DATA_DIR / "images"
 METADATA_PATH = BIRD_DATA_DIR / "parsing_metadata.json"
