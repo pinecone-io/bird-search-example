@@ -10,8 +10,7 @@ Four search modes over one Pinecone preview FTS index:
     each bird's primary image vector in the same multimodal space.
   - Combined: server-side ``$match_all`` filter on ``body`` (every required
     term must appear) plus dense-vector ranking on the image embedding —
-    one round trip. Falls back to a client-side substring filter if the
-    backend rejects ``$match_all``.
+    one round trip.
   - Boolean: raw Lucene ``query_string`` — boolean operators, required /
     excluded terms, term boosts, phrase slop, phrase prefixes, cross-field.
 
@@ -647,11 +646,6 @@ with tab_combined:
         "demo flip: visual-only `red bird with black wings` lands on a "
         "scarlet tanager; add `illinois` as a required term and the cardinal "
         "/ red-winged blackbird take over."
-    )
-    st.caption(
-        "If the backend hasn't picked up `$match_all` yet, the helper falls "
-        "back to a wide dense fetch + Python-side substring filter — the "
-        "code block under the results is honest about which path ran."
     )
 
     _example_buttons("combined", [
