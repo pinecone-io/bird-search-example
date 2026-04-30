@@ -211,5 +211,4 @@ embeddings-cache.jsonl
 internal-instructions.md
 .playwright-mcp/
 CLAUDE.md
-demo-queries.md
 example-preprod-nb.ipynb

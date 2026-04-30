@@ -11,7 +11,7 @@ Four search modes over one Pinecone preview FTS index:
   - Combined: server-side ``$match_all`` filter on ``body`` (every required
     term must appear) plus dense-vector ranking on the image embedding —
     one round trip.
-  - Boolean: raw Lucene ``query_string`` — boolean operators, required /
+  - Lucene: raw ``query_string`` — boolean operators, required /
     excluded terms, term boosts, phrase slop, phrase prefixes, cross-field.
 
 Each tab renders the actual ``documents.search(...)`` call beneath the
@@ -412,12 +412,24 @@ with intro_col:
         "the bird looks like — matched against each bird's photo in Gemini "
         "Embedding 2's shared text/image space), **Combined** (visual "
         "ranking narrowed by required keywords on the article body), and "
-        "**Boolean** (raw Lucene `query_string` for boost / slop / phrase "
+        "**Lucene** (raw `query_string` for boost / slop / phrase "
         "prefix / cross-field queries)."
     )
     st.write(
         "Each tab also shows the actual `documents.search(...)` call beneath "
         "its results, so you can see exactly what hit Pinecone."
+    )
+    # "How to construct…" lives inside the left column so it fills the
+    # L-shaped whitespace next to the schema block (which is the taller
+    # of the two columns).
+    st.markdown(
+        """
+**How to construct a new query**
+
+1. **Pick the tab that matches your signal.** Words you'd find *in the article* → **Text FTS** or **Lucene**. Words describing what the *bird looks like* → **Visual**. Both at once → **Combined**.
+2. **Write the query**, using the example buttons under each tab as templates.
+3. **Open "What we sent to Pinecone"** above the results to see the exact `documents.search(...)` call. Every example here is reproducible from that snippet.
+"""
     )
 with schema_col:
     st.markdown("**Index schema**")
@@ -426,6 +438,25 @@ with schema_col:
         "Index `bird-search-fts` · namespace `birds` · "
         "one doc per bird, ~2,079 docs total."
     )
+
+
+# ---------------------------------------------------------------------------
+# Tab quick reference — full-width below the two-col block, since the table
+# itself is wide. Lets viewers orient before clicking into a tab.
+# ---------------------------------------------------------------------------
+
+st.markdown(
+    """
+**Tab quick reference**
+
+| Tab | API shape | Pick when… | Canonical example |
+|---|---|---|---|
+| **Text FTS** | `score_by=[{"type": "text", "field": …}]` (or `query_string` when phrase ON) | You can name a token in the article. Use `multi` with per-field queries to combine signals. | `Mormon crickets` (body) → California gull |
+| **Visual** | `score_by=[{"type": "dense_vector", "field": "image_embedding"}]` | You can describe the bird's appearance but not the article's vocabulary. | `tall pink wading bird with long curved neck` → American flamingo |
+| **Lucene** | `score_by=[{"type": "query_string"}]` (raw Lucene) | You need boosts, slop, phrase prefixes, exclusions, or cross-field clauses. | `body:(eagle^3 OR hawk OR raptor)` → eagles dominate |
+| **Combined** | `filter={"body": {"$match_all": …}}` + dense `score_by` | You need both — a hard text gate and visual rerank. | `illinois` + `red bird with black wings` → cardinal / red-winged blackbird |
+"""
+)
 
 
 # ---------------------------------------------------------------------------
@@ -451,8 +482,8 @@ def _consume_auto_run(label_prefix: str) -> bool:
     return bool(st.session_state.pop(f"{label_prefix}_run_now", False))
 
 
-tab_text, tab_visual, tab_combined, tab_boolean, tab_about = st.tabs(
-    ["Text FTS", "Visual", "Combined", "Boolean", "About"]
+tab_text, tab_visual, tab_boolean, tab_combined = st.tabs(
+    ["Text FTS", "Visual", "Lucene", "Combined"]
 )
 
 # --- Tab 1: Text FTS ------------------------------------------------------
@@ -634,7 +665,57 @@ with tab_visual:
         else:
             st.warning("Enter a description.")
 
-# --- Tab 3: Combined ------------------------------------------------------
+# --- Tab 3: Lucene (raw query_string) ------------------------------------
+with tab_boolean:
+    st.header("Lucene")
+    st.markdown(
+        "Write Lucene `query_string` directly when the Text FTS tab can't "
+        "express what you want. Reach for this tab for **boosts** "
+        "(`eagle^3` weights eagle 3× over peers), **phrase slop** "
+        "(`\"northern cardinal\"~3` allows 3 tokens between the words), "
+        "**phrase prefixes** (`\"james w\"*`), **required / excluded** "
+        "terms (`+illinois -opinion`), and **cross-field clauses** "
+        "(`bird_name:(swallow*) OR body:(swallow)`). Field names on this "
+        "index: `bird_name`, `intro`, `body`."
+    )
+
+    _example_buttons("boolean", [
+        {
+            "label": 'phrase: "state bird of seven"',
+            "state": {"boolean_query": 'body:("state bird of seven")'},
+        },
+        {
+            "label": "boost: eagle^3 OR hawk OR raptor",
+            "state": {"boolean_query": "body:(eagle^3 OR hawk OR raptor)"},
+        },
+        {
+            "label": 'slop: "northern cardinal"~3',
+            "state": {"boolean_query": 'body:("northern cardinal"~3)'},
+        },
+        {
+            "label": "cross-field: bird_name OR body",
+            "state": {"boolean_query": "bird_name:(swallow*) OR body:(swallow)"},
+        },
+        {
+            "label": "+required −excluded",
+            "state": {"boolean_query": "body:(+illinois +cardinal -opinion)"},
+        },
+    ])
+
+    boolean_q = st.text_input(
+        "Lucene query_string",
+        placeholder='body:("state bird of seven")',
+        key="boolean_query",
+    )
+    if st.button("Search", key="boolean_btn", type="primary") or _consume_auto_run("boolean"):
+        if boolean_q.strip():
+            with st.spinner("Searching…"):
+                response = search_query_string(boolean_q)
+            render_results(response)
+        else:
+            st.warning("Enter a Lucene query_string.")
+
+# --- Tab 4: Combined ------------------------------------------------------
 with tab_combined:
     st.header("Combined")
     st.markdown(
@@ -688,89 +769,3 @@ with tab_combined:
             render_results(response)
         else:
             st.warning("Enter at least one filter term and an appearance description.")
-
-# --- Tab 4: Boolean (raw query_string) -----------------------------------
-with tab_boolean:
-    st.header("Boolean / Lucene")
-    st.markdown(
-        "Write Lucene `query_string` directly when the Text FTS tab can't "
-        "express what you want. Reach for this tab for **boosts** "
-        "(`eagle^3` weights eagle 3× over peers), **phrase slop** "
-        "(`\"northern cardinal\"~3` allows 3 tokens between the words), "
-        "**phrase prefixes** (`\"james w\"*`), **required / excluded** "
-        "terms (`+illinois -opinion`), and **cross-field clauses** "
-        "(`bird_name:(swallow*) OR body:(swallow)`). Field names on this "
-        "index: `bird_name`, `intro`, `body`."
-    )
-
-    _example_buttons("boolean", [
-        {
-            "label": 'phrase: "state bird of seven"',
-            "state": {"boolean_query": 'body:("state bird of seven")'},
-        },
-        {
-            "label": "boost: eagle^3 OR hawk OR raptor",
-            "state": {"boolean_query": "body:(eagle^3 OR hawk OR raptor)"},
-        },
-        {
-            "label": 'slop: "northern cardinal"~3',
-            "state": {"boolean_query": 'body:("northern cardinal"~3)'},
-        },
-        {
-            "label": "cross-field: bird_name OR body",
-            "state": {"boolean_query": "bird_name:(swallow*) OR body:(swallow)"},
-        },
-        {
-            "label": "+required −excluded",
-            "state": {"boolean_query": "body:(+illinois +cardinal -opinion)"},
-        },
-    ])
-
-    boolean_q = st.text_input(
-        "Lucene query_string",
-        placeholder='body:("state bird of seven")',
-        key="boolean_query",
-    )
-    if st.button("Search", key="boolean_btn", type="primary") or _consume_auto_run("boolean"):
-        if boolean_q.strip():
-            with st.spinner("Searching…"):
-                response = search_query_string(boolean_q)
-            render_results(response)
-        else:
-            st.warning("Enter a Lucene query_string.")
-
-# --- Tab 5: About ---------------------------------------------------------
-with tab_about:
-    st.header("About")
-    st.markdown(
-        """
-### How to construct a new query
-
-1. **Pick the tab that matches your signal.**
-   - Words you'd find *in the article*? → **Text FTS** or **Boolean**.
-   - Words describing what the *bird looks like*? → **Visual**.
-   - Both at once? → **Combined**.
-2. **Write the query**, using the example buttons as templates.
-3. **Open "What we sent to Pinecone"** above the results to see the
-   exact `documents.search(...)` call. Every example in the demo is
-   reproducible from that snippet.
-
-### Tab quick reference
-
-| Tab | API shape | Pick when… | Canonical example |
-|---|---|---|---|
-| **Text FTS** | `score_by=[{"type": "text", "field": …}]` (or `query_string` when phrase ON) | You can name a token in the article. Use `multi` with per-field queries to combine signals. | `Mormon crickets` (body) → California gull |
-| **Visual** | `score_by=[{"type": "dense_vector", "field": "image_embedding"}]` | You can describe the bird's appearance but not the article's vocabulary. | `tall pink wading bird with long curved neck` → American flamingo |
-| **Combined** | `filter={"body": {"$match_all": …}}` + dense `score_by` | You need both — a hard text gate and visual rerank. | `illinois` + `red bird with black wings` → cardinal / red-winged blackbird |
-| **Boolean** | `score_by=[{"type": "query_string"}]` (raw Lucene) | You need boosts, slop, phrase prefixes, exclusions, or cross-field clauses. | `body:(eagle^3 OR hawk OR raptor)` → eagles dominate |
-
-### Data and schema
-
-~2,079 North American bird Wikipedia articles. Each doc has three text
-fields (`bird_name`, `intro`, `body`) plus one dense `image_embedding`
-(Gemini Embedding 2, 768d, multimodal text+image space). Index
-`bird-search-fts`, namespace `birds`, single Pinecone preview FTS index —
-the schema block in the top-right is the literal `SchemaBuilder` chain
-sent at create time.
-        """
-    )
