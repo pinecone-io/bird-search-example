@@ -454,7 +454,7 @@ st.markdown(
 | **Text FTS** | `score_by=[{"type": "text", "field": …}]` (or `query_string` when phrase ON) | You can name a token in the article. Use `multi` with per-field queries to combine signals. | `Mormon crickets` (body) → California gull |
 | **Visual** | `score_by=[{"type": "dense_vector", "field": "image_embedding"}]` | You can describe the bird's appearance but not the article's vocabulary. | `tall pink wading bird with long curved neck` → American flamingo |
 | **Lucene** | `score_by=[{"type": "query_string"}]` (raw Lucene) | You need boosts, slop, phrase prefixes, exclusions, or cross-field clauses. | `body:(eagle^3 OR hawk OR raptor)` → eagles dominate |
-| **Combined** | `filter={"body": {"$match_all": …}}` + dense `score_by` | You need both — a hard text gate and visual rerank. | `illinois` + `red bird with black wings` → cardinal / red-winged blackbird |
+| **Combined** | `filter={"body": {"$match_all": …}}` + dense `score_by` | You need both — a hard text gate and visual rerank. | `swoop, illinois` + `black bird with bright spots on wings` → Red-winged blackbird |
 """
 )
 
@@ -650,6 +650,10 @@ with tab_visual:
             "label": "iridescent green hovering at a flower",
             "state": {"visual_query": "small iridescent green bird hovering at a flower"},
         },
+        {
+            "label": "black bird with bright spots on wings",
+            "state": {"visual_query": "black bird with bright spots on wings"},
+        },
     ])
 
     visual_query = st.text_input(
@@ -725,16 +729,18 @@ with tab_combined:
         "term must appear in the article body) plus a `dense_vector` "
         "`score_by` clause on `image_embedding` (Gemini-2 ranks each "
         "survivor by visual similarity to your description). The "
-        "demo flip: visual-only `red bird with black wings` lands on a "
-        "scarlet tanager; add `illinois` as a required term and the cardinal "
-        "/ red-winged blackbird take over."
+        "demo flip: visual-only `black bird with bright spots on wings` "
+        "lands on yellow-shouldered & tricolored blackbirds, antwrens, "
+        "starlings; add `swoop, illinois` as required terms and the "
+        "**Red-winged blackbird** leaps to #1 — its red shoulder patches "
+        "*are* the territorial-defense markings the article describes."
     )
 
     _example_buttons("combined", [
         {
-            "label": "illinois + red bird with black wings",
-            "state": {"combined_filter": "illinois",
-                      "combined_visual": "red bird with black wings"},
+            "label": "swoop, illinois + black bird with bright spots on wings",
+            "state": {"combined_filter": "swoop, illinois",
+                      "combined_visual": "black bird with bright spots on wings"},
         },
         {
             "label": "mormon + white gull with gray wings",
@@ -750,12 +756,12 @@ with tab_combined:
 
     filter_raw = st.text_input(
         "Must mention (comma-separated terms)",
-        placeholder="illinois",
+        placeholder="swoop, illinois",
         key="combined_filter",
     )
     visual_q = st.text_input(
         "Describe appearance",
-        placeholder="red bird with black wings",
+        placeholder="black bird with bright spots on wings",
         key="combined_visual",
     )
     if st.button("Search", key="combined_btn", type="primary") or _consume_auto_run("combined"):

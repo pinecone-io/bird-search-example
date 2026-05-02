@@ -4,11 +4,11 @@ Streamlit app showcasing Pinecone's preview FTS API + Gemini Embedding 2 (multim
 
 ## Setup
 
-1. Install the Pinecone preview SDK 
+1. Install the Pinecone preview SDK separately (it's not yet on PyPI). Then install the rest:
    ```
-   pip install -r requirements.txt (need to update)
+   pip install -r requirements.txt
    ```
-   `requirements.txt` includes the preview SDK's runtime transitives (`httpx[http2]`, `msgspec`, `orjson`) so a fresh checkout boots without "module not found" errors.
+   `requirements.txt` includes the preview SDK's runtime transitives (`httpx[http2]`, `msgspec`, `orjson`) so a fresh checkout boots without "module not found" errors once the preview SDK is installed.
 2. Copy `.env.example` to `.env` and fill in `PINECONE_API_KEY` and `GOOGLE_API_KEY`.
 3. Build the index with a small sample first:
    ```
@@ -24,6 +24,6 @@ The bird dataset lives at `parsed_birds/` in this repo (~58 MB, committed): `par
 
 - **Text FTS** — keyword and multi-field search over `bird_name` / `intro` / `body`.
 - **Visual** — typed description → Gemini-2 text embedding → scored against each bird's image vector.
-- **Combined** — dense-vector rank via Gemini-2, narrowed by a client-side substring filter on `body` for required terms. Will swap to a server-side `$matches_all` hard filter once that operator is live in preview. E.g. "must mention illinois" + "describe red bird with black wings".
+- **Combined** — server-side `$match_all` filter on `body` (every required term must appear) plus dense-vector ranking on `image_embedding` — one Pinecone round trip. E.g. "must mention illinois" + "describe red bird with black wings".
 - **About** — examples.
 
