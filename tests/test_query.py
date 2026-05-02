@@ -1,12 +1,17 @@
-"""Sanity tests for ``query.py``.
+"""Mocked unit tests for ``query.py``.
 
-These tests patch ``pinecone.Pinecone`` and ``google.genai.Client`` at import
-time so ``query.py`` can be imported without real credentials, then assert
-each helper assembles the expected ``idx.documents.search`` request and
-returns a ``SearchResult`` exposing matches + the call we made.
+These tests patch ``pinecone.Pinecone`` and ``google.genai.Client`` at
+import time so ``query.py`` can be imported without real credentials,
+then assert each helper assembles the expected ``idx.documents.search``
+request and returns a ``SearchResult`` exposing matches + the call
+that was made.
 
-Do not run pytest in this environment — these assertions document the
-contract that ``query.py`` is written against.
+Run with::
+
+    pytest tests/test_query.py -v
+
+These run offline; the live counterparts in ``tests/test_live.py`` hit
+the real preprod-aws-0 index and require API keys.
 """
 
 from __future__ import annotations
@@ -18,21 +23,18 @@ from unittest import mock
 import pytest
 
 
-def _fresh_query_module(search_matches=None, raise_on_first_call: Exception | None = None):
+def _fresh_query_module(search_matches=None):
     """Import (or re-import) ``query`` with both clients fully mocked.
 
-    ``search_matches`` injects a list of fake match objects so the
-    client-side filter in ``search_filter_visual`` has something to operate
-    on. ``raise_on_first_call`` makes the first ``documents.search`` call
-    raise — used to exercise ``search_filter_visual``'s fallback path.
+    ``search_matches`` injects a list of fake match objects on the
+    mocked ``documents.search`` response — used by helpers that read
+    matches back from the response (e.g. the
+    ``search_filter_visual(filter_terms=[])`` short-circuit path that
+    delegates to ``search_visual``).
     """
     matches = list(search_matches or [])
     response = mock.MagicMock(matches=matches)
-
-    if raise_on_first_call is not None:
-        fake_search = mock.MagicMock(side_effect=[raise_on_first_call, response])
-    else:
-        fake_search = mock.MagicMock(return_value=response)
+    fake_search = mock.MagicMock(return_value=response)
 
     fake_idx = mock.MagicMock()
     fake_idx.documents.search = fake_search

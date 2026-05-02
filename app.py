@@ -11,7 +11,7 @@ Four search modes over one Pinecone preview FTS index:
   - Combined: server-side ``$match_all`` filter on ``body`` (every required
     term must appear) plus dense-vector ranking on the image embedding —
     one round trip.
-  - Boolean: raw Lucene ``query_string`` — boolean operators, required /
+  - Lucene: raw ``query_string`` — boolean operators, required /
     excluded terms, term boosts, phrase slop, phrase prefixes, cross-field.
 
 Each tab renders the actual ``documents.search(...)`` call beneath the
@@ -412,12 +412,24 @@ with intro_col:
         "the bird looks like — matched against each bird's photo in Gemini "
         "Embedding 2's shared text/image space), **Combined** (visual "
         "ranking narrowed by required keywords on the article body), and "
-        "**Boolean** (raw Lucene `query_string` for boost / slop / phrase "
+        "**Lucene** (raw `query_string` for boost / slop / phrase "
         "prefix / cross-field queries)."
     )
     st.write(
         "Each tab also shows the actual `documents.search(...)` call beneath "
         "its results, so you can see exactly what hit Pinecone."
+    )
+    # "How to construct…" lives inside the left column so it fills the
+    # L-shaped whitespace next to the schema block (which is the taller
+    # of the two columns).
+    st.markdown(
+        """
+**How to construct a new query**
+
+1. **Pick the tab that matches your signal.** Words you'd find *in the article* → **Text FTS** or **Lucene**. Words describing what the *bird looks like* → **Visual**. Both at once → **Combined**.
+2. **Write the query**, using the example buttons under each tab as templates.
+3. **Open "What we sent to Pinecone"** above the results to see the exact `documents.search(...)` call. Every example here is reproducible from that snippet.
+"""
     )
 with schema_col:
     st.markdown("**Index schema**")
@@ -426,6 +438,25 @@ with schema_col:
         "Index `bird-search-fts` · namespace `birds` · "
         "one doc per bird, ~2,079 docs total."
     )
+
+
+# ---------------------------------------------------------------------------
+# Tab quick reference — full-width below the two-col block, since the table
+# itself is wide. Lets viewers orient before clicking into a tab.
+# ---------------------------------------------------------------------------
+
+st.markdown(
+    """
+**Tab quick reference**
+
+| Tab | API shape | Pick when… | Canonical example |
+|---|---|---|---|
+| **Text FTS** | `score_by=[{"type": "text", "field": …}]` (or `query_string` when phrase ON) | You can name a token in the article. Use `multi` with per-field queries to combine signals. | `Mormon crickets` (body) → California gull |
+| **Visual** | `score_by=[{"type": "dense_vector", "field": "image_embedding"}]` | You can describe the bird's appearance but not the article's vocabulary. | `tall pink wading bird with long curved neck` → American flamingo |
+| **Lucene** | `score_by=[{"type": "query_string"}]` (raw Lucene) | You need boosts, slop, phrase prefixes, exclusions, or cross-field clauses. | `body:(eagle^3 OR hawk OR raptor)` → eagles dominate |
+| **Combined** | `filter={"body": {"$match_all": …}}` + dense `score_by` | You need both — a hard text gate and visual rerank. | `swoop, illinois` + `black bird with bright spots on wings` → Red-winged blackbird |
+"""
+)
 
 
 # ---------------------------------------------------------------------------
@@ -451,8 +482,8 @@ def _consume_auto_run(label_prefix: str) -> bool:
     return bool(st.session_state.pop(f"{label_prefix}_run_now", False))
 
 
-tab_text, tab_visual, tab_combined, tab_boolean, tab_about = st.tabs(
-    ["Text FTS", "Visual", "Combined", "Boolean", "About"]
+tab_text, tab_visual, tab_boolean, tab_combined = st.tabs(
+    ["Text FTS", "Visual", "Lucene", "Combined"]
 )
 
 # --- Tab 1: Text FTS ------------------------------------------------------
@@ -619,6 +650,10 @@ with tab_visual:
             "label": "iridescent green hovering at a flower",
             "state": {"visual_query": "small iridescent green bird hovering at a flower"},
         },
+        {
+            "label": "black bird with bright spots on wings",
+            "state": {"visual_query": "black bird with bright spots on wings"},
+        },
     ])
 
     visual_query = st.text_input(
@@ -634,64 +669,9 @@ with tab_visual:
         else:
             st.warning("Enter a description.")
 
-# --- Tab 3: Combined ------------------------------------------------------
-with tab_combined:
-    st.header("Combined")
-    st.markdown(
-        "The headline cross-modal query — **filter by text, rerank by "
-        "image, in one round trip**. Sent as `filter={\"body\": "
-        "{\"$match_all\": \"…\"}}` (server-side hard filter; every required "
-        "term must appear in the article body) plus a `dense_vector` "
-        "`score_by` clause on `image_embedding` (Gemini-2 ranks each "
-        "survivor by visual similarity to your description). The "
-        "demo flip: visual-only `red bird with black wings` lands on a "
-        "scarlet tanager; add `illinois` as a required term and the cardinal "
-        "/ red-winged blackbird take over."
-    )
-
-    _example_buttons("combined", [
-        {
-            "label": "illinois + red bird with black wings",
-            "state": {"combined_filter": "illinois",
-                      "combined_visual": "red bird with black wings"},
-        },
-        {
-            "label": "mormon + white gull with gray wings",
-            "state": {"combined_filter": "mormon",
-                      "combined_visual": "white gull with gray wings"},
-        },
-        {
-            "label": "tundra, arctic + large white bird",
-            "state": {"combined_filter": "tundra, arctic",
-                      "combined_visual": "large white bird"},
-        },
-    ])
-
-    filter_raw = st.text_input(
-        "Must mention (comma-separated terms)",
-        placeholder="illinois",
-        key="combined_filter",
-    )
-    visual_q = st.text_input(
-        "Describe appearance",
-        placeholder="red bird with black wings",
-        key="combined_visual",
-    )
-    if st.button("Search", key="combined_btn", type="primary") or _consume_auto_run("combined"):
-        filter_terms = [t.strip() for t in filter_raw.split(",") if t.strip()]
-        if filter_terms and visual_q.strip():
-            with st.spinner("Filtering and ranking…"):
-                response = search_filter_visual(
-                    filter_terms=filter_terms,
-                    visual_q=visual_q,
-                )
-            render_results(response)
-        else:
-            st.warning("Enter at least one filter term and an appearance description.")
-
-# --- Tab 4: Boolean (raw query_string) -----------------------------------
+# --- Tab 3: Lucene (raw query_string) ------------------------------------
 with tab_boolean:
-    st.header("Boolean / Lucene")
+    st.header("Lucene")
     st.markdown(
         "Write Lucene `query_string` directly when the Text FTS tab can't "
         "express what you want. Reach for this tab for **boosts** "
@@ -739,38 +719,59 @@ with tab_boolean:
         else:
             st.warning("Enter a Lucene query_string.")
 
-# --- Tab 5: About ---------------------------------------------------------
-with tab_about:
-    st.header("About")
+# --- Tab 4: Combined ------------------------------------------------------
+with tab_combined:
+    st.header("Combined")
     st.markdown(
-        """
-### How to construct a new query
-
-1. **Pick the tab that matches your signal.**
-   - Words you'd find *in the article*? → **Text FTS** or **Boolean**.
-   - Words describing what the *bird looks like*? → **Visual**.
-   - Both at once? → **Combined**.
-2. **Write the query**, using the example buttons as templates.
-3. **Open "What we sent to Pinecone"** above the results to see the
-   exact `documents.search(...)` call. Every example in the demo is
-   reproducible from that snippet.
-
-### Tab quick reference
-
-| Tab | API shape | Pick when… | Canonical example |
-|---|---|---|---|
-| **Text FTS** | `score_by=[{"type": "text", "field": …}]` (or `query_string` when phrase ON) | You can name a token in the article. Use `multi` with per-field queries to combine signals. | `Mormon crickets` (body) → California gull |
-| **Visual** | `score_by=[{"type": "dense_vector", "field": "image_embedding"}]` | You can describe the bird's appearance but not the article's vocabulary. | `tall pink wading bird with long curved neck` → American flamingo |
-| **Combined** | `filter={"body": {"$match_all": …}}` + dense `score_by` | You need both — a hard text gate and visual rerank. | `illinois` + `red bird with black wings` → cardinal / red-winged blackbird |
-| **Boolean** | `score_by=[{"type": "query_string"}]` (raw Lucene) | You need boosts, slop, phrase prefixes, exclusions, or cross-field clauses. | `body:(eagle^3 OR hawk OR raptor)` → eagles dominate |
-
-### Data and schema
-
-~2,079 North American bird Wikipedia articles. Each doc has three text
-fields (`bird_name`, `intro`, `body`) plus one dense `image_embedding`
-(Gemini Embedding 2, 768d, multimodal text+image space). Index
-`bird-search-fts`, namespace `birds`, single Pinecone preview FTS index —
-the schema block in the top-right is the literal `SchemaBuilder` chain
-sent at create time.
-        """
+        "The headline cross-modal query — **filter by text, rerank by "
+        "image, in one round trip**. Sent as `filter={\"body\": "
+        "{\"$match_all\": \"…\"}}` (server-side hard filter; every required "
+        "term must appear in the article body) plus a `dense_vector` "
+        "`score_by` clause on `image_embedding` (Gemini-2 ranks each "
+        "survivor by visual similarity to your description). The "
+        "demo flip: visual-only `black bird with bright spots on wings` "
+        "lands on yellow-shouldered & tricolored blackbirds, antwrens, "
+        "starlings; add `swoop, illinois` as required terms and the "
+        "**Red-winged blackbird** leaps to #1 — its red shoulder patches "
+        "*are* the territorial-defense markings the article describes."
     )
+
+    _example_buttons("combined", [
+        {
+            "label": "swoop, illinois + black bird with bright spots on wings",
+            "state": {"combined_filter": "swoop, illinois",
+                      "combined_visual": "black bird with bright spots on wings"},
+        },
+        {
+            "label": "mormon + white gull with gray wings",
+            "state": {"combined_filter": "mormon",
+                      "combined_visual": "white gull with gray wings"},
+        },
+        {
+            "label": "tundra, arctic + large white bird",
+            "state": {"combined_filter": "tundra, arctic",
+                      "combined_visual": "large white bird"},
+        },
+    ])
+
+    filter_raw = st.text_input(
+        "Must mention (comma-separated terms)",
+        placeholder="swoop, illinois",
+        key="combined_filter",
+    )
+    visual_q = st.text_input(
+        "Describe appearance",
+        placeholder="black bird with bright spots on wings",
+        key="combined_visual",
+    )
+    if st.button("Search", key="combined_btn", type="primary") or _consume_auto_run("combined"):
+        filter_terms = [t.strip() for t in filter_raw.split(",") if t.strip()]
+        if filter_terms and visual_q.strip():
+            with st.spinner("Filtering and ranking…"):
+                response = search_filter_visual(
+                    filter_terms=filter_terms,
+                    visual_q=visual_q,
+                )
+            render_results(response)
+        else:
+            st.warning("Enter at least one filter term and an appearance description.")

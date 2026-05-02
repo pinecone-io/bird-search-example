@@ -291,12 +291,20 @@ def search_filter_visual(
     ``visual_q="red bird with black wings"`` → Illinois-range birds
     ranked by visual similarity to that description.
 
-    Empty ``filter_terms`` short-circuits to pure visual search.
+    **UI vs library behavior.** The Combined tab in ``app.py`` requires
+    *both* a non-empty filter and a non-empty visual description before
+    it will call this helper — it shows a warning otherwise. Programmatic
+    callers, however, can pass an empty / whitespace-only
+    ``filter_terms`` list, in which case this helper short-circuits to a
+    pure visual search via :func:`search_visual`. This split is
+    intentional: the UI guards the cross-modal demo beat (filter + rerank
+    is the headline), while the library stays composable.
 
-    Note: there used to be a Python-side substring fallback for backends
-    that hadn't picked up ``$match_all`` yet; it was removed once preprod
-    accepted the operator. If a future backend regresses, this helper
-    will raise rather than degrade — the live tests will catch it first.
+    The helper used to fall back to a wide dense fetch + Python-side
+    substring filter for backends that hadn't picked up ``$match_all``
+    yet; that fallback was removed once preprod accepted the operator.
+    If a future backend regresses on ``$match_all``, this helper will
+    raise rather than degrade — the live tests will catch it first.
     """
     emb = embed_text(visual_q)
     required = [t.strip() for t in filter_terms if t.strip()]
