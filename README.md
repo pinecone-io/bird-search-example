@@ -26,3 +26,6 @@ The bird dataset lives at `parsed_birds/` in this repo (~58 MB, committed): `par
 - **Combined** — server-side `$match_all` filter on `body` (every required term must appear) plus dense-vector ranking on `image_embedding` — one Pinecone round trip. E.g. "must mention illinois" + "describe red bird with black wings".
 - **About** — examples.
 
+## License
+
+MIT
