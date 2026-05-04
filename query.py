@@ -48,7 +48,7 @@ GEMINI_EMBED_DIMENSIONS = 768
 INCLUDE_FIELDS = ["bird_name", "intro", "body"]
 
 
-pc = Pinecone()
+pc = Pinecone(source_tag="pinecone:bird_search_example")
 gem = genai.Client()
 
 
