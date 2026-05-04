@@ -1,5 +1,5 @@
 """Live integration tests — every example in ``demo-queries.md`` against
-the real ``bird-search-fts`` index on preprod-aws-0.
+the real ``bird-search-fts`` index.
 
 Each test does two things:
 1. **Asserts request shape** on ``result.kwargs`` so an SDK bump that

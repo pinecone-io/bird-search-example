@@ -48,7 +48,7 @@ GEMINI_EMBED_DIMENSIONS = 768
 INCLUDE_FIELDS = ["bird_name", "intro", "body"]
 
 
-pc = Pinecone(additional_headers={"x-environment": "preprod-aws-0"})
+pc = Pinecone()
 gem = genai.Client()
 
 

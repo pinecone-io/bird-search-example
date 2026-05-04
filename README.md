@@ -4,11 +4,10 @@ Streamlit app showcasing Pinecone's preview FTS API + Gemini Embedding 2 (multim
 
 ## Setup
 
-1. Install the Pinecone preview SDK separately (it's not yet on PyPI). Then install the rest:
+1. Install dependencies:
    ```
    pip install -r requirements.txt
    ```
-   `requirements.txt` includes the preview SDK's runtime transitives (`httpx[http2]`, `msgspec`, `orjson`) so a fresh checkout boots without "module not found" errors once the preview SDK is installed.
 2. Copy `.env.example` to `.env` and fill in `PINECONE_API_KEY` and `GOOGLE_API_KEY`.
 3. Build the index with a small sample first:
    ```
