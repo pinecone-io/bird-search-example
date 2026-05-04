@@ -3,7 +3,7 @@
 Live tests under ``tests/test_live.py`` exercise the real
 ``bird-search-fts`` index. They are not run in CI — they exist so we can
 sanity-check every example in ``demo-queries.md`` against the live index
-before/after a Pinecone preview SDK bump (DR-722).
+before/after a Pinecone SDK bump.
 
 The ``live_index`` fixture short-circuits the whole live test module when
 ``PINECONE_API_KEY`` or ``GOOGLE_API_KEY`` is unset, so plain
