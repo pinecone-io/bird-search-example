@@ -88,7 +88,7 @@ EMBED_BASE_BACKOFF_S = 2.0
 # Client handles — lazy at module scope so imports are cheap / testable.
 # -----------------------------------------------------------------------------
 
-pc = Pinecone(additional_headers={"x-environment": "preprod-aws-0"})  # preview backend
+pc = Pinecone(source_tag="pinecone:bird_search_example")
 gem = genai.Client()     # reads GOOGLE_API_KEY
 
 

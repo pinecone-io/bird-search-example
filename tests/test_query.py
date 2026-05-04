@@ -11,7 +11,7 @@ Run with::
     pytest tests/test_query.py -v
 
 These run offline; the live counterparts in ``tests/test_live.py`` hit
-the real preprod-aws-0 index and require API keys.
+the real index and require API keys.
 """
 
 from __future__ import annotations

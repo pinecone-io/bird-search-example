@@ -1,6 +1,6 @@
 """Shared pytest fixtures.
 
-Live tests under ``tests/test_live.py`` exercise the real preprod-aws-0
+Live tests under ``tests/test_live.py`` exercise the real
 ``bird-search-fts`` index. They are not run in CI — they exist so we can
 sanity-check every example in ``demo-queries.md`` against the live index
 before/after a Pinecone preview SDK bump (DR-722).
