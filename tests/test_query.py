@@ -23,7 +23,7 @@ from unittest import mock
 import pytest
 
 
-def _fresh_query_module(search_matches=None):
+def _fresh_query_module(search_matches=None, search_side_effect=None):
     """Import (or re-import) ``query`` with both dependencies fully mocked.
 
     ``search_matches`` injects a list of fake match objects on the
@@ -31,10 +31,17 @@ def _fresh_query_module(search_matches=None):
     matches back from the response (e.g. the
     ``search_filter_visual(filter_terms=[])`` short-circuit path that
     delegates to ``search_visual``).
+
+    ``search_side_effect``, if given, is a list of responses returned on
+    successive ``documents.search`` calls in order — used by
+    ``search_hybrid_rrf``, which issues two calls (text, then dense) and
+    needs each to return a different match set.
     """
     matches = list(search_matches or [])
     response = mock.MagicMock(matches=matches)
     fake_search = mock.MagicMock(return_value=response)
+    if search_side_effect is not None:
+        fake_search.side_effect = search_side_effect
 
     fake_idx = mock.MagicMock()
     fake_idx.documents.search = fake_search
@@ -205,3 +212,49 @@ def test_search_filter_visual_pure_visual_when_no_terms():
     assert "filter" not in kwargs
     assert kwargs["score_by"][0]["type"] == "dense_vector"
     assert [m._id for m in result.matches] == ["cardinal"]
+
+
+def test_rrf_combine_sums_reciprocal_ranks():
+    """A doc present (and decently ranked) in every ranking should beat one
+    that's #1 in only a single ranking — the whole point of RRF."""
+    query, _, _ = _fresh_query_module()
+    scores = query._rrf_combine([["A", "B"], ["B", "C"]], k=60)
+    assert scores["A"] == pytest.approx(1 / 61)
+    assert scores["C"] == pytest.approx(1 / 62)
+    assert scores["B"] == pytest.approx(1 / 62 + 1 / 61)
+    assert scores["B"] > scores["A"] > scores["C"]
+
+
+def test_search_hybrid_rrf_fuses_two_independent_calls():
+    """Issues a text call then a dense call, and fuses their rankings —
+    a doc absent from both individual top spots (but present in both
+    lists) should still win the fused ranking."""
+    text_response = mock.MagicMock(
+        matches=[_fake_match("A", "a"), _fake_match("B", "b")]
+    )
+    dense_response = mock.MagicMock(
+        matches=[_fake_match("B", "b"), _fake_match("C", "c")]
+    )
+    query, fake_search, fake_embed_text = _fresh_query_module(
+        search_side_effect=[text_response, dense_response]
+    )
+
+    result = query.search_hybrid_rrf(
+        "some text", "some visual", field="body", top_k=3, fetch_k=10
+    )
+
+    assert fake_search.call_count == 2
+    fake_embed_text.assert_called_once()
+
+    text_kwargs = fake_search.call_args_list[0].kwargs
+    dense_kwargs = fake_search.call_args_list[1].kwargs
+    assert text_kwargs["score_by"][0]["type"] == "text"
+    assert text_kwargs["score_by"][0]["field"] == "body"
+    assert dense_kwargs["score_by"][0]["type"] == "dense_vector"
+    assert dense_kwargs["score_by"][0]["field"] == "image_embedding"
+
+    # B ranks #2 in text and #1 in dense — decent on both beats being #1
+    # on only one (A).
+    assert [m._id for m in result.matches] == ["B", "A", "C"]
+    assert result.kwargs == text_kwargs
+    assert "rrf_combine" in result.extra_code

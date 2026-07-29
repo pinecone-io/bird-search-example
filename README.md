@@ -71,6 +71,9 @@ A `$match_all` filter on `body` (every required keyword must appear in the artic
 ### Lucene
 Raw Lucene `query_string` for advanced queries: boolean operators (`+required -excluded`), term boosts (`eagle^3`), phrase slop (`"northern cardinal"~3`), phrase prefixes, and cross-field clauses.
 
+### Hybrid (RRF)
+Pinecone has no built-in way to fuse two independently-issued searches (unlike the Combined tab's single-call filter+rerank, or `multi`'s single-call multi-field blend — both server-side). This tab runs a BM25 text search and a dense-vector visual search separately, then merges their *rankings* client-side via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf): `score(doc) = Σ 1/(k + rank)` summed across every ranking a doc appears in (`k=60`). Shows the text-only and visual-only rankings side by side with the fused result, so you can see which results only surfaced *because* both signals were combined.
+
 Each tab shows the exact `documents.search(...)` call beneath the results so you can see what was sent to Pinecone.
 
 ## Learn more
