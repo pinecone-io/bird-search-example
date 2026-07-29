@@ -9,8 +9,8 @@ Thin wrappers over `idx.documents.search(...)` for each of the UI tabs:
     search_visual         text embed (local SigLIP by default, or Gemini —
                           see embedder.py) scored against stored image
                           embeddings (cross-modal)
-    search_filter_visual  $match_all body filter + dense visual rerank in
-                          one Pinecone call
+    search_filter_visual  text-match filter ($match_all / $match_any /
+                          $match_phrase) + dense visual rerank in one call
     search_hybrid_rrf     BM25 text search + dense visual search, fused
                           client-side via Reciprocal Rank Fusion (Pinecone
                           has no built-in cross-call fusion)
@@ -261,21 +261,49 @@ def search_visual(q: str, top_k: int = 10) -> SearchResult:
     })
 
 
+_MATCH_MODES = {
+    "all": "$match_all",
+    "any": "$match_any",
+    "phrase": "$match_phrase",
+}
+
+
 def search_filter_visual(
     filter_terms: list[str],
     visual_q: str,
     filter_field: str = "body",
     top_k: int = 10,
+    mode: str = "all",
 ) -> SearchResult:
-    """Compound query: require every term in ``filter_terms`` to appear in
-    ``filter_field`` (server-side ``$match_all``) and rank survivors by
-    dense-vector similarity to ``visual_q``'s embedding (local SigLIP by
-    default, or Gemini — see embedder.py). One Pinecone call — hard filter
-    + visual rerank.
+    """Compound query: a text-match filter on ``filter_field`` narrows
+    candidates, then dense-vector similarity to ``visual_q``'s embedding
+    (local SigLIP by default, or Gemini — see embedder.py) ranks the
+    survivors. One Pinecone call — hard filter + visual rerank.
 
-    Example: ``filter_terms=["illinois"]`` on ``body`` plus
-    ``visual_q="red bird with black wings"`` → Illinois-range birds
-    ranked by visual similarity to that description.
+    ``mode`` picks which of Pinecone's three text-match filter operators
+    gates the candidates (see the "Text-match filters" table in the
+    [FTS docs](https://docs.pinecone.io/guides/search/full-text-search)):
+
+    - ``"all"`` (default) — ``$match_all``: every term in ``filter_terms``
+      must appear, in any order. The precise default.
+    - ``"any"`` — ``$match_any``: at least one term must appear. Widens
+      the candidate pool for when you're not sure which of several
+      related terms the article uses — at the cost of admitting weaker
+      matches for the visual rerank to sort through.
+    - ``"phrase"`` — ``$match_phrase``: the terms must appear as a
+      contiguous phrase, in the order given. Stricter than ``"all"``:
+      rejects documents where the words merely co-occur without meaning
+      the same thing together.
+
+    Example (verified live): ``filter_terms=["epaulet", "yellow"]`` on
+    ``body`` with ``mode="all"`` plus ``visual_q="black bird with bright
+    spots on wings"`` puts the Red-winged blackbird at #1 (visual-only
+    search alone ranks it #19). Switching to ``mode="any"`` on the *same*
+    terms drops it to #7 — the wider net admits enough other yellow- or
+    epaulet-mentioning birds that the visual rerank can't recover the
+    precision on its own. ``mode="phrase"`` with
+    ``filter_terms=["yellow wing bar"]`` (the literal phrase from the
+    article) also puts it at #1.
 
     **UI vs library behavior.** The Combined tab in ``app.py`` requires
     *both* a non-empty filter and a non-empty visual description before
@@ -289,18 +317,20 @@ def search_filter_visual(
     The helper used to fall back to a wide dense fetch + Python-side
     substring filter for backends that hadn't picked up ``$match_all``
     yet; that fallback was removed once preprod accepted the operator.
-    If a future backend regresses on ``$match_all``, this helper will
+    If a future backend regresses on these operators, this helper will
     raise rather than degrade — the live tests will catch it first.
     """
     emb = embed_text(visual_q)
     required = [t.strip() for t in filter_terms if t.strip()]
     if not required:
         return search_visual(visual_q, top_k=top_k)
+    if mode not in _MATCH_MODES:
+        raise ValueError(f"mode must be one of {sorted(_MATCH_MODES)}, got {mode!r}")
 
     return _execute({
         "namespace": NAMESPACE,
         "top_k": top_k,
-        "filter": {filter_field: {"$match_all": " ".join(required)}},
+        "filter": {filter_field: {_MATCH_MODES[mode]: " ".join(required)}},
         "score_by": [
             {"type": "dense_vector", "field": "image_embedding", "values": emb}
         ],

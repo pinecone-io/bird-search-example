@@ -11,10 +11,11 @@ Five search modes over one Pinecone preview FTS index:
     scored against each bird's primary image vector in the same
     multimodal space.
   - Lucene: raw ``query_string`` — boolean operators, required /
-    excluded terms, term boosts, phrase slop, phrase prefixes, cross-field.
-  - Combined: server-side ``$match_all`` filter on ``body`` (every required
-    term must appear) plus dense-vector ranking on the image embedding —
-    one round trip.
+    excluded terms, term boosts, phrase slop, phrase prefixes, fuzzy
+    (typo-tolerant) matching, regex, grouping, cross-field.
+  - Combined: server-side text-match filter on ``body`` (``$match_all`` /
+    ``$match_any`` / ``$match_phrase``, chosen via a mode toggle) plus
+    dense-vector ranking on the image embedding — one round trip.
   - Hybrid (RRF): text search and visual search run independently, then
     fused client-side via Reciprocal Rank Fusion — Pinecone has no
     built-in way to combine two separately-issued searches.
@@ -461,10 +462,11 @@ with intro_col:
         "(keyword search over the article fields), **Visual** (type what "
         "the bird looks like — matched against each bird's photo in a "
         "shared text/image embedding space), **Lucene** (raw "
-        "`query_string` for boost / slop / phrase prefix / cross-field "
-        "queries), **Combined** (visual ranking narrowed by required "
-        "keywords on the article body), and **Hybrid (RRF)** (text and "
-        "visual search fused client-side via Reciprocal Rank Fusion)."
+        "`query_string` for boost / slop / phrase prefix / fuzzy / regex / "
+        "cross-field queries), **Combined** (visual ranking narrowed by a "
+        "text-match filter — all/any/exact-phrase — on the article body), "
+        "and **Hybrid (RRF)** (text and visual search fused client-side "
+        "via Reciprocal Rank Fusion)."
     )
     st.write(
         "Each tab also shows the actual `documents.search(...)` call beneath "
@@ -503,9 +505,9 @@ st.markdown(
 | Tab | API shape | Pick when… | Canonical example |
 |---|---|---|---|
 | **Text FTS** | `score_by=[{"type": "text", "field": …}]` (or `query_string` when phrase ON) | You can name a token in the article. Use `multi` with per-field queries to combine signals. | `Mormon crickets` (body) → California gull |
-| **Visual** | `score_by=[{"type": "dense_vector", "field": "image_embedding"}]` | You can describe the bird's appearance but not the article's vocabulary. | `tall pink wading bird with long curved neck` → American flamingo |
-| **Lucene** | `score_by=[{"type": "query_string"}]` (raw Lucene) | You need boosts, slop, phrase prefixes, exclusions, or cross-field clauses. | `body:(eagle^3 OR hawk OR raptor)` → eagles dominate |
-| **Combined** | `filter={"body": {"$match_all": …}}` + dense `score_by` | You need both — a hard text gate and visual rerank. | `swoop, illinois` + `black bird with bright spots on wings` → Red-winged blackbird |
+| **Visual** | `score_by=[{"type": "dense_vector", "field": "image_embedding"}]` | You can describe the bird's appearance but not the article's vocabulary. | `small iridescent green bird hovering at a flower` → White-crested coquette (a hummingbird) |
+| **Lucene** | `score_by=[{"type": "query_string"}]` (raw Lucene) | You need boosts, slop, fuzzy/typo tolerance, regex, phrase prefixes, exclusions, grouping, or cross-field clauses. | `bird_name:(cardnal~1)` (typo, no exact spelling) → Northern cardinal |
+| **Combined** | `filter={"body": {mode: …}}` (`$match_all`/`$match_any`/`$match_phrase`) + dense `score_by` | You need both — a hard text gate and visual rerank — and want to tune precision vs. recall. | All: `epaulet, yellow` + `black bird with bright spots on wings` → Red-winged blackbird (#19 visual-only → #1 filtered) |
 | **Hybrid (RRF)** | Two separate calls (`text` + `dense_vector`), fused client-side | Neither signal alone is decisive, but *both* being decent should count for something. | `songbird territory` + `bright red bird` → Northern cardinal (outside both individual top 5s) |
 """
 )
@@ -726,13 +728,29 @@ with tab_boolean:
     st.header("Lucene")
     st.markdown(
         "Write Lucene `query_string` directly when the Text FTS tab can't "
-        "express what you want. Reach for this tab for **boosts** "
-        "(`eagle^3` weights eagle 3× over peers), **phrase slop** "
-        "(`\"northern cardinal\"~3` allows 3 tokens between the words), "
-        "**phrase prefixes** (`\"james w\"*`), **required / excluded** "
-        "terms (`+illinois -opinion`), and **cross-field clauses** "
-        "(`bird_name:(swallow*) OR body:(swallow)`). Field names on this "
-        "index: `bird_name`, `intro`, `body`."
+        "express what you want — this is the full syntax Pinecone's "
+        "`query_string` ranking type supports:"
+    )
+    st.markdown(
+        """
+| Feature | Syntax | Example |
+|---|---|---|
+| Boolean AND / OR / NOT | `AND` `OR` `NOT` | `body:(mountain AND eagle)` |
+| Required / excluded | `+term` `-term` | `body:(+illinois +cardinal -opinion)` |
+| Term boost | `term^N` | `body:(eagle^3 OR hawk OR raptor)` |
+| Exact phrase | `"words"` | `body:("state bird of seven")` |
+| Phrase slop | `"phrase"~N` | `body:("northern cardinal"~3)` |
+| Phrase prefix | `"words"*` | `body:("james w"*)` |
+| **Fuzzy** (typo-tolerant) | `term~` or `term~N` | `bird_name:(cardnal~1)` |
+| **Regex** | `field:/pattern/` | `bird_name:/.*owl.*/` |
+| Grouping | `(expr)` | `body:((eagle OR hawk) AND mountain)` |
+| Cross-field | `f1:(…) OR f2:(…)` | `bird_name:(swallow*) OR body:(swallow)` |
+
+Field names on this index: `bird_name`, `intro`, `body`. Two nuances worth knowing:
+
+- **Fuzzy edit distance** — `term~` picks the distance automatically (exact match for words under 4 letters, 1 edit for 4–7, 2 edits for 8+); `term~N` fixes it. `bird_name:(cardnal~1)` matches "Northern cardinal" even though "cardnal" is missing a letter — no exact spelling required.
+- **Regex matches the *indexed* token, not your original spelling** — `body` has stemming on (see the schema), so a word like "woodpecker" is indexed as its stem ("woodpeck"), and `body:/woodpecker/` matches nothing. `bird_name`/`intro` aren't stemmed, so regex there matches the lowercased surface word directly — which is why the example below targets `bird_name`.
+"""
     )
 
     _example_buttons("boolean", [
@@ -747,6 +765,22 @@ with tab_boolean:
         {
             "label": 'slop: "northern cardinal"~3',
             "state": {"boolean_query": 'body:("northern cardinal"~3)'},
+        },
+        {
+            "label": "fuzzy: cardnal~1 (typo)",
+            "state": {"boolean_query": "bird_name:(cardnal~1)"},
+        },
+        {
+            "label": "regex: names containing 'owl'",
+            "state": {"boolean_query": "bird_name:/.*owl.*/"},
+        },
+        {
+            "label": "grouping: (eagle OR hawk) AND mountain",
+            "state": {"boolean_query": "body:((eagle OR hawk) AND mountain)"},
+        },
+        {
+            "label": "NOT: cardinal NOT northern",
+            "state": {"boolean_query": "body:(cardinal NOT northern)"},
         },
         {
             "label": "cross-field: bird_name OR body",
@@ -772,44 +806,80 @@ with tab_boolean:
             st.warning("Enter a Lucene query_string.")
 
 # --- Tab 4: Combined ------------------------------------------------------
+_MATCH_MODE_LABELS = {
+    "All terms (any order) · $match_all": "all",
+    "Any term · $match_any": "any",
+    "Exact phrase · $match_phrase": "phrase",
+}
+
 with tab_combined:
     st.header("Combined")
     st.markdown(
         "The headline cross-modal query — **filter by text, rerank by "
-        "image, in one round trip**. Sent as `filter={\"body\": "
-        "{\"$match_all\": \"…\"}}` (server-side hard filter; every required "
-        "term must appear in the article body) plus a `dense_vector` "
-        "`score_by` clause on `image_embedding` (the configured embedding "
-        "provider ranks each survivor by visual similarity to your "
-        "description). The "
-        "demo flip: visual-only `black bird with bright spots on wings` "
-        "lands on yellow-shouldered & tricolored blackbirds, antwrens, "
-        "starlings; add `swoop, illinois` as required terms and the "
-        "**Red-winged blackbird** leaps to #1 — its red shoulder patches "
-        "*are* the territorial-defense markings the article describes."
+        "image, in one round trip**. A text-match `filter` on `body` "
+        "narrows candidates server-side; a `dense_vector` `score_by` "
+        "clause on `image_embedding` then ranks survivors by visual "
+        "similarity to your description (configured embedding provider). "
+        "Pinecone has three text-match filter operators, each a different "
+        "precision/recall trade-off — pick one below:\n\n"
+        "- **All terms** (`$match_all`) — every term must appear, in any "
+        "order. The precise default.\n"
+        "- **Any term** (`$match_any`) — at least one term must appear. "
+        "Casts a wider net when you're unsure which term the article "
+        "uses, at the cost of diluting the candidate pool with weaker "
+        "matches.\n"
+        "- **Exact phrase** (`$match_phrase`) — the words must appear "
+        "*adjacent, in order*. Stricter than \"All terms\": rejects "
+        "documents where the words merely co-occur without meaning the "
+        "same thing together.\n\n"
+        "**The demo flip** (verified live): visual-only `black bird with "
+        "bright spots on wings` ranks the **Red-winged blackbird** #19 — "
+        "outside the top 10. Filter on `epaulet, yellow` with **All "
+        "terms** and it leaps to **#1** (its red shoulder patch — an "
+        "\"epaulet\" — and yellow wing bar are exactly what the visual "
+        "query describes). Switch the *same two terms* to **Any term** "
+        "and it falls back to **#7** — one term alone can't hold the "
+        "candidate pool to birds that are actually a strong match on "
+        "both signals. **Exact phrase** on `yellow wing bar` (the "
+        "literal phrase from the article) also puts it back at #1."
     )
 
     _example_buttons("combined", [
         {
-            "label": "swoop, illinois + black bird with bright spots on wings",
-            "state": {"combined_filter": "swoop, illinois",
-                      "combined_visual": "black bird with bright spots on wings"},
+            "label": "All: epaulet, yellow",
+            "state": {"combined_filter": "epaulet, yellow",
+                      "combined_visual": "black bird with bright spots on wings",
+                      "combined_mode": "All terms (any order) · $match_all"},
+        },
+        {
+            "label": "Any: epaulet, yellow (compare!)",
+            "state": {"combined_filter": "epaulet, yellow",
+                      "combined_visual": "black bird with bright spots on wings",
+                      "combined_mode": "Any term · $match_any"},
+        },
+        {
+            "label": "Phrase: yellow wing bar",
+            "state": {"combined_filter": "yellow wing bar",
+                      "combined_visual": "black bird with bright spots on wings",
+                      "combined_mode": "Exact phrase · $match_phrase"},
         },
         {
             "label": "mormon + white gull with gray wings",
             "state": {"combined_filter": "mormon",
-                      "combined_visual": "white gull with gray wings"},
-        },
-        {
-            "label": "tundra, arctic + large white bird",
-            "state": {"combined_filter": "tundra, arctic",
-                      "combined_visual": "large white bird"},
+                      "combined_visual": "white gull with gray wings",
+                      "combined_mode": "All terms (any order) · $match_all"},
         },
     ])
 
+    mode_label = st.radio(
+        "Match mode",
+        options=list(_MATCH_MODE_LABELS),
+        horizontal=True,
+        key="combined_mode",
+    )
     filter_raw = st.text_input(
-        "Must mention (comma-separated terms)",
-        placeholder="swoop, illinois",
+        "Must mention (comma-separated terms — or a single phrase for Exact phrase mode)",
+        placeholder="epaulet, yellow",
         key="combined_filter",
     )
     visual_q = st.text_input(
@@ -824,6 +894,7 @@ with tab_combined:
                 response = search_filter_visual(
                     filter_terms=filter_terms,
                     visual_q=visual_q,
+                    mode=_MATCH_MODE_LABELS[mode_label],
                 )
             render_results(response)
         else:

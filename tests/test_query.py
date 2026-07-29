@@ -198,6 +198,43 @@ def test_search_filter_visual_uses_match_all_filter():
     assert result.extra_code == ""
 
 
+def test_search_filter_visual_match_any_mode():
+    """``mode='any'`` switches the filter operator to ``$match_any``."""
+    query, fake_search, _ = _fresh_query_module()
+    query.search_filter_visual(
+        filter_terms=["epaulet", "yellow"],
+        visual_q="black bird with bright spots on wings",
+        mode="any",
+    )
+    _, kwargs = fake_search.call_args
+    assert kwargs["filter"] == {"body": {"$match_any": "epaulet yellow"}}
+
+
+def test_search_filter_visual_match_phrase_mode():
+    """``mode='phrase'`` switches the filter operator to ``$match_phrase``,
+    preserving term order (unlike ``all``/``any``, where order is
+    irrelevant)."""
+    query, fake_search, _ = _fresh_query_module()
+    query.search_filter_visual(
+        filter_terms=["yellow wing bar"],
+        visual_q="black bird with bright spots on wings",
+        mode="phrase",
+    )
+    _, kwargs = fake_search.call_args
+    assert kwargs["filter"] == {"body": {"$match_phrase": "yellow wing bar"}}
+
+
+def test_search_filter_visual_invalid_mode_raises():
+    query, fake_search, _ = _fresh_query_module()
+    with pytest.raises(ValueError):
+        query.search_filter_visual(
+            filter_terms=["illinois"],
+            visual_q="red bird",
+            mode="bogus",
+        )
+    fake_search.assert_not_called()
+
+
 def test_search_filter_visual_pure_visual_when_no_terms():
     """Empty / whitespace-only filter terms = pure visual search;
     falls through to ``search_visual`` (single dense call, no filter)."""
