@@ -6,8 +6,8 @@ Four search modes over one Pinecone preview FTS index:
     different queries per field (e.g. bird_name=swallow + body=mountains).
     An "exact phrase" toggle routes the query through Lucene ``query_string``
     when adjacency matters.
-  - Visual: typed description embedded via Gemini Embedding 2, scored against
-    each bird's primary image vector in the same multimodal space.
+  - Visual: typed description embedded via a local SigLIP model, scored
+    against each bird's primary image vector in the same multimodal space.
   - Combined: server-side ``$match_all`` filter on ``body`` (every required
     term must appear) plus dense-vector ranking on the image embedding —
     one round trip.
@@ -409,11 +409,11 @@ with intro_col:
     st.write(
         "Search ~2,079 North American birds four ways: **Text FTS** "
         "(keyword search over the article fields), **Visual** (type what "
-        "the bird looks like — matched against each bird's photo in Gemini "
-        "Embedding 2's shared text/image space), **Combined** (visual "
-        "ranking narrowed by required keywords on the article body), and "
-        "**Lucene** (raw `query_string` for boost / slop / phrase "
-        "prefix / cross-field queries)."
+        "the bird looks like — matched against each bird's photo in a "
+        "local SigLIP model's shared text/image space), **Combined** "
+        "(visual ranking narrowed by required keywords on the article "
+        "body), and **Lucene** (raw `query_string` for boost / slop / "
+        "phrase prefix / cross-field queries)."
     )
     st.write(
         "Each tab also shows the actual `documents.search(...)` call beneath "
@@ -626,11 +626,11 @@ with tab_visual:
     st.header("Visual")
     st.markdown(
         "Cross-modal search — type **what the bird looks like** in plain "
-        "English. Your text is embedded with Gemini Embedding 2 and scored "
-        "against each bird's primary photo embedding (same multimodal "
-        "space). No keywords required: phrasing like *clown beak* or "
-        "*roundest birds ever that are red* lands on the right photos even "
-        "when the article never uses those words."
+        "English. Your text is embedded with a local SigLIP model and "
+        "scored against each bird's primary photo embedding (same "
+        "multimodal space). No keywords required: phrasing like *clown "
+        "beak* or *roundest birds ever that are red* lands on the right "
+        "photos even when the article never uses those words."
     )
 
     _example_buttons("visual", [
@@ -727,8 +727,8 @@ with tab_combined:
         "image, in one round trip**. Sent as `filter={\"body\": "
         "{\"$match_all\": \"…\"}}` (server-side hard filter; every required "
         "term must appear in the article body) plus a `dense_vector` "
-        "`score_by` clause on `image_embedding` (Gemini-2 ranks each "
-        "survivor by visual similarity to your description). The "
+        "`score_by` clause on `image_embedding` (the local SigLIP model "
+        "ranks each survivor by visual similarity to your description). The "
         "demo flip: visual-only `black bird with bright spots on wings` "
         "lands on yellow-shouldered & tricolored blackbirds, antwrens, "
         "starlings; add `swoop, illinois` as required terms and the "

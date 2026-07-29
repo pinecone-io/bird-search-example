@@ -2,8 +2,8 @@
 
 Builds a Pinecone preview FTS index over a sample of the parsed Wikipedia bird
 corpus, with three full-text fields (bird_name, intro, body) and one dense
-vector field (image_embedding) populated from Gemini Embedding 2 over each
-bird's primary image.
+vector field (image_embedding) populated from a local SigLIP model (see
+embedder.py) over each bird's primary image.
 
 Usage:
     python build_index.py [--create-only] [--sample N] [--recreate]
@@ -19,7 +19,6 @@ with model + dim). Re-running resumes where a previous run stopped; pass
 
 Env:
     PINECONE_API_KEY       required (read via Pinecone() default)
-    GOOGLE_API_KEY         required (read via genai.Client() default)
     BIRD_DATA_DIR          overrides the default parsed_birds path
 """
 
@@ -29,7 +28,6 @@ import argparse
 import json
 import os
 import pathlib
-import random
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -44,8 +42,7 @@ from tqdm import tqdm
 from pinecone import Pinecone
 from pinecone.preview import SchemaBuilder
 
-from google import genai
-from google.genai import types as genai_types
+import embedder
 
 
 # -----------------------------------------------------------------------------
@@ -55,9 +52,9 @@ from google.genai import types as genai_types
 INDEX = "bird-search-fts"
 NAMESPACE = "birds"
 
-GEMINI_MODEL = "gemini-embedding-2"
+EMBED_MODEL_NAME = embedder.EMBED_MODEL_NAME
 
-GEMINI_EMBED_DIMENSIONS = 768
+EMBED_DIMENSIONS = embedder.EMBED_DIMENSIONS
 
 
 _DEFAULT_DATA_DIR_PATH = pathlib.Path(__file__).resolve().parent / "parsed_birds"
@@ -67,21 +64,14 @@ DEFAULT_DATA_DIR = os.environ.get("BIRD_DATA_DIR", str(_DEFAULT_DATA_DIR_PATH))
 # Embedding cache + concurrency
 # -----------------------------------------------------------------------------
 
-# Resumable cache of Gemini image embeddings — one JSONL line per bird. If
-# the ingest is interrupted (Ctrl+C, rate limits, crash), re-running picks up
-# only the birds not already present. Each line is tagged with the model ID
-# and output dimension so a config change silently invalidates old rows on
+# Resumable cache of local image embeddings — one JSONL line per bird. If
+# the ingest is interrupted (Ctrl+C, crash), re-running picks up only the
+# birds not already present. Each line is tagged with the model ID and
+# output dimension so a config change silently invalidates old rows on
 # load rather than reusing stale vectors against a new schema.
 EMBED_CACHE_PATH = pathlib.Path(__file__).resolve().parent / "embeddings-cache.jsonl"
 
-# Will need to change or adjust this if using without paid tier
 EMBED_CONCURRENCY = 8
-
-# Exponential backoff bounds on a single embed call.
-# covers typical transient failures (429s, 5xxs) without stalling the whole
-# ingest on a permanent outage.
-EMBED_MAX_RETRIES = 5
-EMBED_BASE_BACKOFF_S = 2.0
 
 
 # -----------------------------------------------------------------------------
@@ -89,22 +79,6 @@ EMBED_BASE_BACKOFF_S = 2.0
 # -----------------------------------------------------------------------------
 
 pc = Pinecone(source_tag="pinecone:bird_search_example")
-gem = genai.Client()     # reads GOOGLE_API_KEY
-
-
-
-_EMBED_CONFIG = genai_types.EmbedContentConfig(
-    output_dimensionality=GEMINI_EMBED_DIMENSIONS,
-)
-
-
-def embed_image(pil_image: Image.Image) -> list[float]:
-    """Embed a PIL image into Gemini-2's multimodal space, truncated to
-    GEMINI_EMBED_DIMENSIONS."""
-    resp = gem.models.embed_content(
-        model=GEMINI_MODEL, contents=pil_image, config=_EMBED_CONFIG
-    )
-    return list(resp.embeddings[0].values)
 
 
 # -----------------------------------------------------------------------------
@@ -169,30 +143,6 @@ def split_intro_body(text: str) -> tuple[str, str]:
     return paragraphs[0], "\n\n".join(paragraphs[1:])
 
 
-def embed_image_with_retry(pil_image: Image.Image) -> list[float]:
-    """Gemini embed call with exponential backoff + jitter on transient errors.
-
-    Raises the last exception if every attempt fails.
-    """
-    last_exc: Exception | None = None
-    for attempt in range(EMBED_MAX_RETRIES):
-        try:
-            return embed_image(pil_image)
-        except Exception as exc:
-            last_exc = exc
-            if attempt == EMBED_MAX_RETRIES - 1:
-                break
-            sleep_s = EMBED_BASE_BACKOFF_S * (2 ** attempt) + random.uniform(0, 1)
-            print(
-                f"  embed retry in {sleep_s:.1f}s (attempt {attempt + 1}"
-                f"/{EMBED_MAX_RETRIES}): {exc}",
-                file=sys.stderr,
-            )
-            time.sleep(sleep_s)
-    assert last_exc is not None
-    raise last_exc
-
-
 def load_embedding_cache(path: pathlib.Path) -> dict[str, list[float]]:
     """Read the JSONL cache and return ``{slug: embedding}`` for rows whose
     ``model`` and ``dim`` match the current config. Stale rows (different
@@ -219,8 +169,8 @@ def load_embedding_cache(path: pathlib.Path) -> dict[str, list[float]]:
                 stale += 1
                 continue
             if (
-                row.get("model") != GEMINI_MODEL
-                or row.get("dim") != GEMINI_EMBED_DIMENSIONS
+                row.get("model") != EMBED_MODEL_NAME
+                or row.get("dim") != EMBED_DIMENSIONS
             ):
                 stale += 1
                 continue
@@ -238,8 +188,8 @@ def append_embedding_cache(
     """Append one JSONL row and fsync so a Ctrl+C mid-run preserves progress."""
     row = {
         "slug": slug,
-        "model": GEMINI_MODEL,
-        "dim": GEMINI_EMBED_DIMENSIONS,
+        "model": EMBED_MODEL_NAME,
+        "dim": EMBED_DIMENSIONS,
         "embedding": embedding,
     }
     with path.open("a") as f:
@@ -252,17 +202,17 @@ def append_embedding_cache(
 def _embed_one_bird(
     slug: str, entry: dict[str, Any], data_dir: pathlib.Path
 ) -> tuple[str, list[float] | None, str | None]:
-    """Worker body: open the bird's primary image, embed with retry.
+    """Worker body: open the bird's primary image, embed it locally.
 
     Returns (slug, embedding or None, error_message or None). Image
-    decoding and the Gemini call happen entirely inside the worker so
+    decoding and the embed call happen entirely inside the worker so
     concurrent threads don't contend on a single open file handle.
     """
     try:
         img_path = data_dir / "images" / entry["images"][0]["local_path"]
         with Image.open(img_path) as im:
             im.load()
-            emb = embed_image_with_retry(im)
+            emb = embedder.embed_image(im)
         return slug, emb, None
     except Exception as exc:
         return slug, None, str(exc)
@@ -485,7 +435,7 @@ def main() -> None:
 
     # ---- Create-index mode (no ingestion) -----------------------------------
     if args.create_only:
-        ensure_index(embed_dim=GEMINI_EMBED_DIMENSIONS, recreate=args.recreate)
+        ensure_index(embed_dim=EMBED_DIMENSIONS, recreate=args.recreate)
         wait_until_ready()
         print(
             f"Index '{INDEX}' is Ready. Re-run without --create-only to embed "
@@ -497,7 +447,7 @@ def main() -> None:
     # If --recreate, we do the same create+wait pass first; otherwise we require
     # the index to already exist (fail-fast with a clear message).
     if args.recreate:
-        ensure_index(embed_dim=GEMINI_EMBED_DIMENSIONS, recreate=True)
+        ensure_index(embed_dim=EMBED_DIMENSIONS, recreate=True)
         wait_until_ready()
     elif not pc.preview.indexes.exists(INDEX):
         raise SystemExit(
