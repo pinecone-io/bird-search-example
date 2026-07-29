@@ -6,7 +6,8 @@ Thin wrappers over `idx.documents.search(...)` for each of the UI tabs:
     search_text_multi     blended multi-field FTS (bird_name + intro + body)
     search_text_phrase    exact-phrase FTS via `query_string` with quotes
     search_query_string   raw Lucene query_string (boolean / boost / slop / …)
-    search_visual         Gemini-2 text embed scored against stored image
+    search_visual         text embed (local SigLIP by default, or Gemini —
+                          see embedder.py) scored against stored image
                           embeddings (cross-modal)
     search_filter_visual  $match_all body filter + dense visual rerank in
                           one Pinecone call
@@ -34,37 +35,16 @@ load_dotenv()
 
 from pinecone import Pinecone
 
-from google import genai
-from google.genai import types as genai_types
+from embedder import embed_text
 
 
 INDEX = "bird-search-fts"
 NAMESPACE = "birds"
 
-GEMINI_MODEL = "gemini-embedding-2"
-
-GEMINI_EMBED_DIMENSIONS = 768
-
 INCLUDE_FIELDS = ["bird_name", "intro", "body"]
 
 
 pc = Pinecone(source_tag="pinecone:bird_search_example")
-gem = genai.Client()
-
-
-
-_EMBED_CONFIG = genai_types.EmbedContentConfig(
-    output_dimensionality=GEMINI_EMBED_DIMENSIONS,
-)
-
-
-def embed_text(text: str) -> list[float]:
-    """Embed a text query into Gemini-2's multimodal space, truncated to
-    GEMINI_EMBED_DIMENSIONS."""
-    resp = gem.models.embed_content(
-        model=GEMINI_MODEL, contents=text, config=_EMBED_CONFIG
-    )
-    return list(resp.embeddings[0].values)
 
 
 def _index():
@@ -103,7 +83,7 @@ def _abbreviate_vectors(payload: Any) -> Any:
                 and v
                 and all(isinstance(x, (int, float)) for x in v)
             ):
-                out[k] = f"<{len(v)}-dim Gemini embedding>"
+                out[k] = f"<{len(v)}-dim embedding>"
             elif k == "sparse_values" and isinstance(v, dict):
                 out[k] = "<sparse {indices, values}>"
             else:
@@ -263,8 +243,10 @@ def search_query_string(query: str, top_k: int = 10) -> SearchResult:
 
 
 def search_visual(q: str, top_k: int = 10) -> SearchResult:
-    """Cross-modal: embed TEXT query via Gemini-2, score against stored IMAGE
-    embeddings. Both the text and the image land in Gemini-2's shared space."""
+    """Cross-modal: embed TEXT query via the configured embedding backend
+    (local SigLIP by default, or Gemini — see embedder.py), score against
+    stored IMAGE embeddings. Both the text and the image land in the same
+    shared space."""
     emb = embed_text(q)
     return _execute({
         "namespace": NAMESPACE,
@@ -284,8 +266,9 @@ def search_filter_visual(
 ) -> SearchResult:
     """Compound query: require every term in ``filter_terms`` to appear in
     ``filter_field`` (server-side ``$match_all``) and rank survivors by
-    dense-vector similarity to ``visual_q``'s Gemini-2 embedding. One
-    Pinecone call — hard filter + visual rerank.
+    dense-vector similarity to ``visual_q``'s embedding (local SigLIP by
+    default, or Gemini — see embedder.py). One Pinecone call — hard filter
+    + visual rerank.
 
     Example: ``filter_terms=["illinois"]`` on ``body`` plus
     ``visual_q="red bird with black wings"`` → Illinois-range birds

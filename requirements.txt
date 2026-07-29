@@ -3,4 +3,7 @@ streamlit
 pillow
 tqdm
 python-dotenv
+torch
+transformers
+sentencepiece
 google-genai
