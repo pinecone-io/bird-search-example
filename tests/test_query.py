@@ -1,10 +1,10 @@
 """Mocked unit tests for ``query.py``.
 
-These tests patch ``pinecone.Pinecone`` and ``google.genai.Client`` at
-import time so ``query.py`` can be imported without real credentials,
-then assert each helper assembles the expected ``idx.documents.search``
-request and returns a ``SearchResult`` exposing matches + the call
-that was made.
+These tests patch ``pinecone.Pinecone`` and ``embedder.embed_text`` at
+import time so ``query.py`` can be imported without real credentials or a
+local model download, then assert each helper assembles the expected
+``idx.documents.search`` request and returns a ``SearchResult`` exposing
+matches + the call that was made.
 
 Run with::
 
@@ -24,7 +24,7 @@ import pytest
 
 
 def _fresh_query_module(search_matches=None):
-    """Import (or re-import) ``query`` with both clients fully mocked.
+    """Import (or re-import) ``query`` with both dependencies fully mocked.
 
     ``search_matches`` injects a list of fake match objects on the
     mocked ``documents.search`` response — used by helpers that read
@@ -42,30 +42,24 @@ def _fresh_query_module(search_matches=None):
     fake_pc = mock.MagicMock()
     fake_pc.preview.index.return_value = fake_idx
 
-    fake_embedding = mock.MagicMock()
-    fake_embedding.values = [0.1, 0.2, 0.3]
-    fake_embed_response = mock.MagicMock(embeddings=[fake_embedding])
-
-    fake_gem = mock.MagicMock()
-    fake_gem.models.embed_content.return_value = fake_embed_response
+    fake_embed_text = mock.MagicMock(return_value=[0.1, 0.2, 0.3])
 
     pinecone_mod = mock.MagicMock()
     pinecone_mod.Pinecone.return_value = fake_pc
 
-    google_mod = mock.MagicMock()
-    google_mod.genai.Client.return_value = fake_gem
+    embedder_mod = mock.MagicMock()
+    embedder_mod.embed_text = fake_embed_text
 
     patches = {
         "pinecone": pinecone_mod,
-        "google": google_mod,
-        "google.genai": google_mod.genai,
+        "embedder": embedder_mod,
     }
     with mock.patch.dict(sys.modules, patches):
         if "query" in sys.modules:
             del sys.modules["query"]
         query = importlib.import_module("query")
 
-    return query, fake_search, fake_gem
+    return query, fake_search, fake_embed_text
 
 
 def _fake_match(_id: str, body: str):
@@ -165,9 +159,9 @@ def test_search_query_string_passes_lucene_through_unchanged():
 
 
 def test_search_visual_uses_dense_vector_on_image_embedding():
-    query, fake_search, fake_gem = _fresh_query_module()
+    query, fake_search, fake_embed_text = _fresh_query_module()
     query.search_visual("red round bird", top_k=3)
-    fake_gem.models.embed_content.assert_called_once()
+    fake_embed_text.assert_called_once()
     _, kwargs = fake_search.call_args
     assert kwargs["top_k"] == 3
     signal = kwargs["score_by"][0]
@@ -178,14 +172,14 @@ def test_search_visual_uses_dense_vector_on_image_embedding():
 
 def test_search_filter_visual_uses_match_all_filter():
     """$match_all + dense_vector → single Pinecone call."""
-    query, fake_search, fake_gem = _fresh_query_module()
+    query, fake_search, fake_embed_text = _fresh_query_module()
     result = query.search_filter_visual(
         filter_terms=["illinois", "forest"],
         visual_q="red bird with black wings",
         filter_field="body",
         top_k=4,
     )
-    fake_gem.models.embed_content.assert_called_once()
+    fake_embed_text.assert_called_once()
     assert fake_search.call_count == 1
     _, kwargs = fake_search.call_args
     assert kwargs["top_k"] == 4
