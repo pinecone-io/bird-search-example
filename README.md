@@ -1,12 +1,14 @@
 # Bird Search v2
 
-A demo app showcasing [Pinecone Full-Text Search](https://docs.pinecone.io/guides/search/full-text-search) combined with multimodal vector search using a local [SigLIP](https://huggingface.co/google/siglip-base-patch16-224) model, over a corpus of ~2,079 North American bird Wikipedia articles - one document per bird.
+A demo app showcasing [Pinecone Full-Text Search](https://docs.pinecone.io/guides/search/full-text-search) combined with multimodal vector search, over a corpus of ~2,079 North American bird Wikipedia articles - one document per bird. The embedding model is swappable between a local model and Gemini Embedding 2 (see [Embedding provider](#embedding-provider)).
 
 ## Prerequisites
 
 - Python 3.10+
 - [Pinecone](https://app.pinecone.io) account and API key
-- ~400MB free disk space for the local SigLIP model weights (downloaded once from the Hugging Face Hub on first run)
+- One of:
+  - **Local embeddings (default)** — no extra account needed; ~400MB free disk space for the [SigLIP](https://huggingface.co/google/siglip-base-patch16-224) model weights (downloaded once from the Hugging Face Hub on first run)
+  - **Gemini embeddings** — a [Google AI Studio](https://aistudio.google.com) API key
 
 ## Setup
 
@@ -14,10 +16,11 @@ A demo app showcasing [Pinecone Full-Text Search](https://docs.pinecone.io/guide
    ```
    pip install -r requirements.txt
    ```
-2. Copy `.env.example` to `.env` and fill in your API key:
+2. Copy `.env.example` to `.env` and fill in your Pinecone API key:
    ```
    PINECONE_API_KEY=...
    ```
+   Leave `EMBED_PROVIDER` at its default (`local`) to run fully offline, or see [Embedding provider](#embedding-provider) to use Gemini instead.
 3. Build the index. Start with a small sample to verify everything works:
    ```
    python build_index.py --sample 50
@@ -41,9 +44,18 @@ The bird dataset lives at `parsed_birds/` (~58 MB, committed to the repo). It co
 
 Each bird is stored in Pinecone as a single document with three text fields (`bird_name`, `intro`, `body`) and one dense vector field (`image_embedding`). Set `BIRD_DATA_DIR` in your environment to override the default data path.
 
-## Why SigLIP
+## Embedding provider
 
-[SigLIP](https://huggingface.co/google/siglip-base-patch16-224) is a multimodal model that embeds both text and images into the same vector space. This makes cross-modal search possible: a text description like *"tall pink wading bird"* produces a vector that is directly comparable to the vector computed from a bird's photo at index time — no separate image captioning or two-stage pipeline needed. It runs entirely locally via `transformers` + `torch` (see `embedder.py`) — weights download once from the Hugging Face Hub and are cached afterward, with no API key and no rate limits. All image embeddings are precomputed during `build_index.py` and stored in Pinecone at 768 dimensions with cosine similarity.
+Both tabs that touch `image_embedding` (**Visual** and **Combined**) rely on a multimodal model that embeds text and images into the *same* vector space — a text description like *"tall pink wading bird"* produces a vector directly comparable to the vector computed from a bird's photo at index time, no separate image captioning or two-stage pipeline needed. Which model does that embedding is switchable via `EMBED_PROVIDER` in `.env` (see `embedder.py`); either way the output is 768 dimensions with cosine similarity, so switching providers never requires a Pinecone schema change.
+
+| | `EMBED_PROVIDER=local` (default) | `EMBED_PROVIDER=gemini` |
+|---|---|---|
+| Model | [SigLIP](https://huggingface.co/google/siglip-base-patch16-224) via `transformers` + `torch` | [Gemini Embedding 2](https://ai.google.dev/gemini-api/docs/embeddings) via `google-genai` |
+| Runs | Fully locally, offline after the first run | Remote API call |
+| Setup | Weights (~400MB) download once from the Hugging Face Hub | Requires `GOOGLE_API_KEY` |
+| Rate limits | None | Subject to Gemini API rate limits (`build_index.py` retries with backoff) |
+
+All image embeddings are precomputed during `build_index.py` and cached at `embeddings-cache.jsonl`, tagged with the model name — switching `EMBED_PROVIDER` automatically invalidates the old provider's cached rows and re-embeds with the new one on the next ingest.
 
 ## Search tabs
 
@@ -51,7 +63,7 @@ Each bird is stored in Pinecone as a single document with three text fields (`bi
 BM25 keyword scoring against `body`, `intro`, or `bird_name`. A `multi` mode searches all three fields at once and lets you write a different query per field (e.g. `bird_name=swallow` + `body=in mountains`). Toggle **Phrase** to require exact word adjacency via Lucene `query_string`.
 
 ### Visual
-Type a description of what a bird looks like. The query is embedded via the local SigLIP model and scored against each bird's stored image vector. Finds birds by appearance even when the article never uses your exact words.
+Type a description of what a bird looks like. The query is embedded via the configured embedding provider (see [Embedding provider](#embedding-provider)) and scored against each bird's stored image vector. Finds birds by appearance even when the article never uses your exact words.
 
 ### Combined
 A `$match_all` filter on `body` (every required keyword must appear in the article) combined with dense-vector visual reranking — in a single Pinecone round trip. Use when you need both a hard text gate and visual ranking.

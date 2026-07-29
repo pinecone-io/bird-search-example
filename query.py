@@ -6,7 +6,8 @@ Thin wrappers over `idx.documents.search(...)` for each of the UI tabs:
     search_text_multi     blended multi-field FTS (bird_name + intro + body)
     search_text_phrase    exact-phrase FTS via `query_string` with quotes
     search_query_string   raw Lucene query_string (boolean / boost / slop / …)
-    search_visual         local text embed scored against stored image
+    search_visual         text embed (local SigLIP by default, or Gemini —
+                          see embedder.py) scored against stored image
                           embeddings (cross-modal)
     search_filter_visual  $match_all body filter + dense visual rerank in
                           one Pinecone call
@@ -242,9 +243,10 @@ def search_query_string(query: str, top_k: int = 10) -> SearchResult:
 
 
 def search_visual(q: str, top_k: int = 10) -> SearchResult:
-    """Cross-modal: embed TEXT query via the local SigLIP model, score
-    against stored IMAGE embeddings. Both the text and the image land in
-    SigLIP's shared space."""
+    """Cross-modal: embed TEXT query via the configured embedding backend
+    (local SigLIP by default, or Gemini — see embedder.py), score against
+    stored IMAGE embeddings. Both the text and the image land in the same
+    shared space."""
     emb = embed_text(q)
     return _execute({
         "namespace": NAMESPACE,
@@ -264,8 +266,9 @@ def search_filter_visual(
 ) -> SearchResult:
     """Compound query: require every term in ``filter_terms`` to appear in
     ``filter_field`` (server-side ``$match_all``) and rank survivors by
-    dense-vector similarity to ``visual_q``'s local SigLIP embedding. One
-    Pinecone call — hard filter + visual rerank.
+    dense-vector similarity to ``visual_q``'s embedding (local SigLIP by
+    default, or Gemini — see embedder.py). One Pinecone call — hard filter
+    + visual rerank.
 
     Example: ``filter_terms=["illinois"]`` on ``body`` plus
     ``visual_q="red bird with black wings"`` → Illinois-range birds
