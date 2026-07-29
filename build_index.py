@@ -2,8 +2,9 @@
 
 Builds a Pinecone preview FTS index over a sample of the parsed Wikipedia bird
 corpus, with three full-text fields (bird_name, intro, body) and one dense
-vector field (image_embedding) populated from a local SigLIP model (see
-embedder.py) over each bird's primary image.
+vector field (image_embedding) populated from each bird's primary image via
+a configurable embedding backend — local SigLIP by default, or Gemini
+Embedding 2 (see embedder.py, EMBED_PROVIDER).
 
 Usage:
     python build_index.py [--create-only] [--sample N] [--recreate]
@@ -19,6 +20,8 @@ with model + dim). Re-running resumes where a previous run stopped; pass
 
 Env:
     PINECONE_API_KEY       required (read via Pinecone() default)
+    EMBED_PROVIDER          "local" (default) or "gemini" — see embedder.py
+    GOOGLE_API_KEY          required only when EMBED_PROVIDER=gemini
     BIRD_DATA_DIR          overrides the default parsed_birds path
 """
 

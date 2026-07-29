@@ -6,11 +6,12 @@ sanity-check every example in ``demo-queries.md`` against the live index
 before/after a Pinecone SDK bump.
 
 The ``live_index`` fixture short-circuits the whole live test module when
-``PINECONE_API_KEY`` is unset, so plain ``pytest tests/`` on a machine
+``PINECONE_API_KEY`` is unset (or, if EMBED_PROVIDER=gemini, when
+``GOOGLE_API_KEY`` is also unset), so plain ``pytest tests/`` on a machine
 without keys still passes (the mocked unit tests in ``test_query.py`` stay
-green). Note the local SigLIP model still runs for real in these tests —
-the first invocation on a machine without a warm Hugging Face cache will
-download its weights (~400MB).
+green). With the default local embedding provider, note the SigLIP model
+still runs for real in these tests — the first invocation on a machine
+without a warm Hugging Face cache will download its weights (~400MB).
 
 Run live tests with::
 
@@ -34,9 +35,14 @@ if str(_REPO_ROOT) not in sys.path:
 
 @pytest.fixture(scope="session")
 def live_index():
-    """Real preprod index handle. Skips when the API key is absent."""
-    if not os.getenv("PINECONE_API_KEY"):
-        pytest.skip("Live tests require PINECONE_API_KEY.")
+    """Real preprod index handle. Skips when a required API key is absent."""
+    missing = [] if os.getenv("PINECONE_API_KEY") else ["PINECONE_API_KEY"]
+    if os.getenv("EMBED_PROVIDER", "local").strip().lower() == "gemini" and not os.getenv(
+        "GOOGLE_API_KEY"
+    ):
+        missing.append("GOOGLE_API_KEY")
+    if missing:
+        pytest.skip(f"Live tests require {', '.join(missing)}.")
 
     from query import _index
 

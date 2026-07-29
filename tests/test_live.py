@@ -8,7 +8,8 @@ Each test does two things:
    makes top-k membership stable enough to lock in (we don't pin exact
    ranks, just "the obvious bird shows up in the top N").
 
-Skipped when ``PINECONE_API_KEY`` is unset (see ``tests/conftest.py``).
+Skipped when ``PINECONE_API_KEY`` is unset, or (with EMBED_PROVIDER=gemini)
+when ``GOOGLE_API_KEY`` is also unset (see ``tests/conftest.py``).
 Run with::
 
     pytest tests/test_live.py -v
