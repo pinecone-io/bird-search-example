@@ -1,6 +1,6 @@
 """Streamlit UI for Bird Search v2.
 
-Four search modes over one Pinecone preview FTS index:
+Five search modes over one Pinecone preview FTS index:
   - Text FTS: BM25 token-OR over ``bird_name`` / ``intro`` / ``body``, either
     per-field or blended (``multi``). The blended mode also supports
     different queries per field (e.g. bird_name=swallow + body=mountains).
@@ -13,6 +13,9 @@ Four search modes over one Pinecone preview FTS index:
     one round trip.
   - Lucene: raw ``query_string`` — boolean operators, required /
     excluded terms, term boosts, phrase slop, phrase prefixes, cross-field.
+  - Hybrid (RRF): text search and visual search run independently, then
+    fused client-side via Reciprocal Rank Fusion — Pinecone has no
+    built-in way to combine two separately-issued searches.
 
 Each tab renders the actual ``documents.search(...)`` call beneath the
 results so viewers can see exactly what hit Pinecone.
@@ -30,6 +33,7 @@ import streamlit as st
 
 from query import (
     search_filter_visual,
+    search_hybrid_rrf,
     search_query_string,
     search_text,
     search_text_multi,
@@ -252,6 +256,25 @@ def _render_call_snippet(response) -> None:
             st.code(extra, language="python")
 
 
+def _render_compact_ranking(
+    label: str, matches: list, new_ids: set[str] | None = None
+) -> None:
+    """Compact ranked list (name + score only) for side-by-side comparison
+    views — full result cards (thumbnail, intro, body expander) are too
+    heavy to repeat three times over. ``new_ids`` marks entries with 🆕
+    that don't appear in the other lists being compared against."""
+    st.markdown(f"**{label}**")
+    if not matches:
+        st.caption("No matches.")
+        return
+    for i, m in enumerate(matches, start=1):
+        name = m.get("bird_name") or m._id.replace("_", " ")
+        score = getattr(m, "score", None)
+        score_str = f"{score:.3f}" if score is not None else "—"
+        marker = " 🆕" if new_ids and m._id in new_ids else ""
+        st.markdown(f"{i}. {name} — `{score_str}`{marker}")
+
+
 def render_results(response) -> None:
     # Call snippet first — clickable toggle above the results so demo
     # viewers can see what was sent before they scroll the matches.
@@ -407,13 +430,14 @@ INDEX_SCHEMA_SOURCE = '''SchemaBuilder()
 intro_col, schema_col = st.columns([3, 2])
 with intro_col:
     st.write(
-        "Search ~2,079 North American birds four ways: **Text FTS** "
+        "Search ~2,079 North American birds five ways: **Text FTS** "
         "(keyword search over the article fields), **Visual** (type what "
         "the bird looks like — matched against each bird's photo in Gemini "
         "Embedding 2's shared text/image space), **Combined** (visual "
-        "ranking narrowed by required keywords on the article body), and "
+        "ranking narrowed by required keywords on the article body), "
         "**Lucene** (raw `query_string` for boost / slop / phrase "
-        "prefix / cross-field queries)."
+        "prefix / cross-field queries), and **Hybrid (RRF)** (text and "
+        "visual search fused client-side via Reciprocal Rank Fusion)."
     )
     st.write(
         "Each tab also shows the actual `documents.search(...)` call beneath "
@@ -455,6 +479,7 @@ st.markdown(
 | **Visual** | `score_by=[{"type": "dense_vector", "field": "image_embedding"}]` | You can describe the bird's appearance but not the article's vocabulary. | `tall pink wading bird with long curved neck` → American flamingo |
 | **Lucene** | `score_by=[{"type": "query_string"}]` (raw Lucene) | You need boosts, slop, phrase prefixes, exclusions, or cross-field clauses. | `body:(eagle^3 OR hawk OR raptor)` → eagles dominate |
 | **Combined** | `filter={"body": {"$match_all": …}}` + dense `score_by` | You need both — a hard text gate and visual rerank. | `swoop, illinois` + `black bird with bright spots on wings` → Red-winged blackbird |
+| **Hybrid (RRF)** | Two separate calls (`text` + `dense_vector`), fused client-side | Neither signal alone is decisive, but *both* being decent should count for something. | `songbird territory` + `bright red bird` → Northern cardinal (outside both individual top 5s) |
 """
 )
 
@@ -482,8 +507,8 @@ def _consume_auto_run(label_prefix: str) -> bool:
     return bool(st.session_state.pop(f"{label_prefix}_run_now", False))
 
 
-tab_text, tab_visual, tab_boolean, tab_combined = st.tabs(
-    ["Text FTS", "Visual", "Lucene", "Combined"]
+tab_text, tab_visual, tab_boolean, tab_combined, tab_hybrid = st.tabs(
+    ["Text FTS", "Visual", "Lucene", "Combined", "Hybrid (RRF)"]
 )
 
 # --- Tab 1: Text FTS ------------------------------------------------------
@@ -775,3 +800,82 @@ with tab_combined:
             render_results(response)
         else:
             st.warning("Enter at least one filter term and an appearance description.")
+
+# --- Tab 5: Hybrid (RRF) ---------------------------------------------------
+with tab_hybrid:
+    st.header("Hybrid (RRF)")
+    st.markdown(
+        "Pinecone doesn't fuse two independently-issued searches for you — "
+        "BM25 text scores and cosine visual scores live on incomparable "
+        "scales, so summing them directly wouldn't mean anything even in "
+        "one call. **Reciprocal Rank Fusion (RRF)** sidesteps that: run "
+        "each search separately, then combine their *rankings* — "
+        "`score(doc) = Σ 1/(k + rank)` summed across every ranking a doc "
+        "appears in (`k=60`).\n\n"
+        "The demo flip: text alone (`songbird territory`) and visual alone "
+        "(`bright red bird`) both miss the **Northern cardinal** in their "
+        "own top 5 (it's #19 on text, #6 on visual) — merely decent on "
+        "*both* signals beats being #1 on only one, so fused, it's #1."
+    )
+
+    _example_buttons("hybrid", [
+        {
+            "label": "songbird territory + bright red bird",
+            "state": {"hybrid_text": "songbird territory",
+                      "hybrid_visual": "bright red bird"},
+        },
+        {
+            "label": "coastal cliffs + gray and white seabird",
+            "state": {"hybrid_text": "coastal cliffs",
+                      "hybrid_visual": "gray and white seabird"},
+        },
+        {
+            "label": "desert + small gray bird",
+            "state": {"hybrid_text": "desert",
+                      "hybrid_visual": "small gray bird"},
+        },
+    ])
+
+    hybrid_text_q = st.text_input(
+        "Text query (BM25 over body)",
+        placeholder="songbird territory",
+        key="hybrid_text",
+    )
+    hybrid_visual_q = st.text_input(
+        "Describe appearance",
+        placeholder="bright red bird",
+        key="hybrid_visual",
+    )
+    if st.button("Search", key="hybrid_btn", type="primary") or _consume_auto_run("hybrid"):
+        if hybrid_text_q.strip() and hybrid_visual_q.strip():
+            with st.spinner("Running text + visual searches, then fusing…"):
+                text_only = search_text(hybrid_text_q, field="body", top_k=5)
+                visual_only = search_visual(hybrid_visual_q, top_k=5)
+                fused = search_hybrid_rrf(
+                    hybrid_text_q, hybrid_visual_q, field="body",
+                    top_k=10, fetch_k=50,
+                )
+
+            text_ids = {m._id for m in text_only.matches}
+            visual_ids = {m._id for m in visual_only.matches}
+            new_ids = {m._id for m in fused.matches} - text_ids - visual_ids
+
+            st.markdown(
+                "**Without RRF** — each signal searched alone, top 5:"
+            )
+            cols = st.columns(2)
+            with cols[0]:
+                _render_compact_ranking("Text only", text_only.matches)
+            with cols[1]:
+                _render_compact_ranking("Visual only", visual_only.matches)
+
+            st.markdown(
+                "**With RRF** — both signals fused, top 10 "
+                "(🆕 = wasn't in either list above):"
+            )
+            _render_compact_ranking("RRF fused", fused.matches, new_ids=new_ids)
+
+            st.divider()
+            render_results(fused)
+        else:
+            st.warning("Enter both a text query and an appearance description.")
