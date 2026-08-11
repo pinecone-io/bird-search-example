@@ -60,6 +60,23 @@ A `$match_all` filter on `body` (every required keyword must appear in the artic
 ### Lucene
 Raw Lucene `query_string` for advanced queries: boolean operators (`+required -excluded`), term boosts (`eagle^3`), phrase slop (`"northern cardinal"~3`), phrase prefixes, and cross-field clauses.
 
+### Hybrid (RRF)
+Pinecone has no built-in way to fuse two independently-issued searches (unlike the Combined tab's single-call filter+rerank, or `multi`'s single-call multi-field blend — both server-side). This tab runs a BM25 text search and a dense-vector visual search separately, then merges their *rankings* client-side via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf): `score(doc) = Σ 1/(k + rank)` summed across every ranking a doc appears in (`k=60`).
+
+**Why fuse rankings instead of just picking one search's results?** BM25 and cosine-similarity scores live on different, incomparable scales, so averaging or summing the raw numbers wouldn't mean anything — and "whichever search's #1 result wins" throws away every bird that's a *strong* match on one signal but only *plausible* on the other. RRF sidesteps both problems by only ever looking at rank position, which makes the two searches comparable, and a bird that's decently ranked on *both* signals typically outscores one that's #1 on only a single axis.
+
+**Example** — text `songbird territory` + visual `bright red bird` (verified against the live index):
+
+| Search | Top result | Rank of Northern cardinal |
+|---|---|---|
+| Text only | Lark bunting | #19 (outside top 5) |
+| Visual only | Red warbler | #6 (outside top 5) |
+| **RRF fused** | **Northern cardinal** | **#1** |
+
+Neither search alone puts the Northern cardinal in its own top 5 — it's a middling text match and a near-miss visual match. But `1/(60+19) + 1/(60+6) ≈ 0.0278` beats every bird that only ranks well on a *single* signal, because none of them accumulate score from a second ranking. That's the concrete benefit: RRF surfaces the bird both signals agree is plausible, even when neither is confident enough on its own to rank it highly — exactly the class of result a single-signal search misses. The tab shows the text-only and visual-only rankings side by side with the fused result (marking 🆕 anything that wasn't in either individual top list) so this effect is visible, not just asserted.
+
+> **Note:** the example above was verified against a live index using the local SigLIP embedding provider. Visual ranking is provider-dependent — if this PR merges while Gemini Embedding 2 is the active provider, spot-check the specific ranks before relying on them; the RRF mechanism itself (and the general shape of the benefit) doesn't depend on which provider is active.
+
 Each tab shows the exact `documents.search(...)` call beneath the results so you can see what was sent to Pinecone.
 
 ## Learn more

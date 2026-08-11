@@ -10,6 +10,9 @@ Thin wrappers over `idx.documents.search(...)` for each of the UI tabs:
                           embeddings (cross-modal)
     search_filter_visual  $match_all body filter + dense visual rerank in
                           one Pinecone call
+    search_hybrid_rrf     BM25 text search + dense visual search, fused
+                          client-side via Reciprocal Rank Fusion (Pinecone currently
+                          has no built-in cross-call fusion)
 
 Every helper returns a ``SearchResult`` with:
 
@@ -320,3 +323,123 @@ def search_filter_visual(
         ],
         "include_fields": INCLUDE_FIELDS,
     })
+
+
+# -----------------------------------------------------------------------------
+# Reciprocal Rank Fusion (RRF) — client-side hybrid search.
+# -----------------------------------------------------------------------------
+#
+# Pinecone currently has no built-in way to fuse two independently-issued searches
+# (unlike search_text_multi's single-call multi-field blend, which is
+# Pinecone's own internal per-call combination of same-shaped scores). BM25
+# text scores and cosine dense-vector scores also live on incomparable
+# scales, so summing them directly wouldn't be meaningful even in one call.
+# RRF sidesteps both problems by fusing *rankings* instead of raw scores.
+
+def _rrf_combine(rankings: list[list[str]], k: int = 60) -> dict[str, float]:
+    """Reciprocal Rank Fusion: for each ranking (a list of doc ids in rank
+    order), add ``1 / (k + rank)`` to that doc's score, rank starting at 1.
+    A doc absent from a ranking contributes 0 from it. ``k=60`` is the
+    default from the original RRF paper (Cormack et al., 2009) — a larger
+    k discounts how much any single ranking's #1 spot dominates the fused
+    order."""
+    scores: dict[str, float] = {}
+    for ranking in rankings:
+        for rank, doc_id in enumerate(ranking, start=1):
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+    return scores
+
+
+class _RRFMatch:
+    """Wraps an SDK match, exposing its fused RRF score as ``.score``
+    instead of the match's original per-list score, so generic score
+    display (the UI, ``highlight_for_field``, etc.) shows the number the
+    fused list is actually sorted by."""
+
+    def __init__(self, match: Any, score: float):
+        self._match = match
+        self._id = match._id
+        self.score = score
+
+    def get(self, *args: Any, **kwargs: Any) -> Any:
+        return self._match.get(*args, **kwargs)
+
+
+def search_hybrid_rrf(
+    text_q: str,
+    visual_q: str,
+    field: str = "body",
+    top_k: int = 10,
+    fetch_k: int = 50,
+    k: int = 60,
+) -> SearchResult:
+    """Hybrid search via Reciprocal Rank Fusion: run a BM25 text search and
+    a dense-vector visual search independently, then merge their rankings
+    client-side (see :func:`_rrf_combine`).
+
+    ``fetch_k`` controls how deep each individual ranking is fetched before
+    fusing (must be >= top_k). A doc ranked outside ``fetch_k`` in one list
+    contributes 0 from that list, so raising ``fetch_k`` lets a
+    weaker-but-present signal still count toward the fused score.
+    """
+    idx = _index()
+
+    text_kwargs = {
+        "namespace": NAMESPACE,
+        "top_k": fetch_k,
+        "score_by": [{"type": "text", "field": field, "query": text_q}],
+        "include_fields": INCLUDE_FIELDS,
+    }
+    text_matches = list(idx.documents.search(**text_kwargs).matches)
+
+    emb = embed_text(visual_q)
+    dense_kwargs = {
+        "namespace": NAMESPACE,
+        "top_k": fetch_k,
+        "score_by": [
+            {"type": "dense_vector", "field": "image_embedding", "values": emb}
+        ],
+        "include_fields": INCLUDE_FIELDS,
+    }
+    dense_matches = list(idx.documents.search(**dense_kwargs).matches)
+
+    rrf_scores = _rrf_combine(
+        [[m._id for m in text_matches], [m._id for m in dense_matches]], k=k
+    )
+    by_id = {m._id: m for m in text_matches}
+    for m in dense_matches:
+        by_id.setdefault(m._id, m)
+    fused_ids = sorted(by_id, key=lambda i: rrf_scores[i], reverse=True)[:top_k]
+    matches = [_RRFMatch(by_id[doc_id], rrf_scores[doc_id]) for doc_id in fused_ids]
+
+    extra_code = (
+        "# Pinecone currently has no built-in fusion across separate calls — merge two\n"
+        "# independently-issued rankings client-side via Reciprocal Rank Fusion:\n"
+        "dense_response = idx.documents.search(\n"
+        f"    namespace={NAMESPACE!r},\n"
+        f"    top_k={fetch_k},\n"
+        '    score_by=[{"type": "dense_vector", "field": "image_embedding", '
+        f'"values": <{len(emb)}-dim embedding>}}],\n'
+        f"    include_fields={INCLUDE_FIELDS!r},\n"
+        ")\n"
+        "\n"
+        f"def rrf_combine(rankings, k={k}):\n"
+        "    scores = {}\n"
+        "    for ranking in rankings:\n"
+        "        for rank, doc_id in enumerate(ranking, start=1):\n"
+        "            scores[doc_id] = scores.get(doc_id, 0.0) + 1 / (k + rank)\n"
+        "    return scores\n"
+        "\n"
+        "rrf_scores = rrf_combine([\n"
+        "    [m._id for m in text_response.matches],\n"
+        "    [m._id for m in dense_response.matches],\n"
+        "])\n"
+        f"fused = sorted(rrf_scores, key=rrf_scores.get, reverse=True)[:{top_k}]"
+    )
+
+    return SearchResult(
+        matches=matches,
+        kwargs=text_kwargs,
+        code=_format_search_call(text_kwargs),
+        extra_code=extra_code,
+    )
