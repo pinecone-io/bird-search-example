@@ -11,7 +11,7 @@ Thin wrappers over `idx.documents.search(...)` for each of the UI tabs:
     search_filter_visual  $match_all body filter + dense visual rerank in
                           one Pinecone call
     search_hybrid_rrf     BM25 text search + dense visual search, fused
-                          client-side via Reciprocal Rank Fusion (Pinecone
+                          client-side via Reciprocal Rank Fusion (Pinecone currently
                           has no built-in cross-call fusion)
 
 Every helper returns a ``SearchResult`` with:
@@ -329,7 +329,7 @@ def search_filter_visual(
 # Reciprocal Rank Fusion (RRF) — client-side hybrid search.
 # -----------------------------------------------------------------------------
 #
-# Pinecone has no built-in way to fuse two independently-issued searches
+# Pinecone currently has no built-in way to fuse two independently-issued searches
 # (unlike search_text_multi's single-call multi-field blend, which is
 # Pinecone's own internal per-call combination of same-shaped scores). BM25
 # text scores and cosine dense-vector scores also live on incomparable
