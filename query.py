@@ -413,7 +413,7 @@ def search_hybrid_rrf(
     matches = [_RRFMatch(by_id[doc_id], rrf_scores[doc_id]) for doc_id in fused_ids]
 
     extra_code = (
-        "# Pinecone has no built-in fusion across separate calls — merge two\n"
+        "# Pinecone currently has no built-in fusion across separate calls — merge two\n"
         "# independently-issued rankings client-side via Reciprocal Rank Fusion:\n"
         "dense_response = idx.documents.search(\n"
         f"    namespace={NAMESPACE!r},\n"
