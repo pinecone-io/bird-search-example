@@ -212,3 +212,6 @@ internal-instructions.md
 .playwright-mcp/
 CLAUDE.md
 example-preprod-nb.ipynb
+
+# macOS
+.DS_Store
