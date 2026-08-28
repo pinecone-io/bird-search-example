@@ -1,6 +1,6 @@
-pinecone==9.0.0
-streamlit==1.50.0
+pinecone==9.1.0
+streamlit==1.62.0
 pillow==11.3.0
 tqdm==4.70.0
-python-dotenv==1.2.1
+python-dotenv==1.2.3
 google-genai==1.47.0
