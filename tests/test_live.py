@@ -16,6 +16,14 @@ Skipped when ``PINECONE_API_KEY`` or ``GOOGLE_API_KEY`` is unset (see
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
+_MISSING = [k for k in ("PINECONE_API_KEY", "GOOGLE_API_KEY") if not os.getenv(k)]
+if _MISSING:
+    pytest.skip(f"Live tests require {', '.join(_MISSING)}.", allow_module_level=True)
+
 from query import (
     search_filter_visual,
     search_query_string,
