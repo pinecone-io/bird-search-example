@@ -1,4 +1,4 @@
-pinecone==9.0.0
+pinecone==10.0.0
 streamlit==1.50.0
 pillow==11.3.0
 tqdm==4.70.0

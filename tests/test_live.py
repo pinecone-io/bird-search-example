@@ -27,7 +27,7 @@ from query import (
 
 
 # ---------------------------------------------------------------------------
-# Tiny match-introspection helpers. The Pinecone preview SDK exposes match
+# Tiny match-introspection helpers. The Pinecone SDK exposes match
 # fields via ``.get(field)`` and the doc id as ``._id``; mirror what app.py
 # / query.py read at runtime.
 # ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ def test_multi_miracle_of_the_gulls(live_index):
     """1b — phrase OFF, `Miracle of the Gulls` (multi) → California gull."""
     result = search_text_multi("Miracle of the Gulls", top_k=10)
 
-    fields = [s["field"] for s in result.kwargs["score_by"]]
+    fields = [s["fields"][0] for s in result.kwargs["score_by"]]
     assert fields == ["bird_name", "intro", "body"]
     assert all(s["type"] == "text" for s in result.kwargs["score_by"])
     assert all(
@@ -107,7 +107,7 @@ def test_text_mormon_crickets(live_index):
     result = search_text("Mormon crickets", field="body", top_k=10)
 
     assert result.kwargs["score_by"] == [
-        {"type": "text", "field": "body", "query": "Mormon crickets"}
+        {"type": "text", "fields": ["body"], "query": "Mormon crickets"}
     ]
 
     assert len(result.matches) > 0
@@ -124,9 +124,9 @@ def test_multi_per_field_swallow_in_mountains(live_index):
 
     # Two clauses (intro is omitted), each carrying its own query.
     clauses = result.kwargs["score_by"]
-    assert [c["field"] for c in clauses] == ["bird_name", "body"]
+    assert [c["fields"][0] for c in clauses] == ["bird_name", "body"]
     assert all(c["type"] == "text" for c in clauses)
-    by_field = {c["field"]: c["query"] for c in clauses}
+    by_field = {c["fields"][0]: c["query"] for c in clauses}
     assert by_field == {"bird_name": "swallow", "body": "in mountains"}
 
     assert len(result.matches) > 0

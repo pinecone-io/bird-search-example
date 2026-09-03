@@ -69,7 +69,7 @@ def embed_text(text: str) -> list[float]:
 
 def _index():
     """Per-call index handle"""
-    return pc.preview.index(name=INDEX)
+    return pc.index(name=INDEX)
 
 
 # -----------------------------------------------------------------------------
@@ -157,7 +157,7 @@ def search_text(q: str, field: str = "body", top_k: int = 10) -> SearchResult:
     return _execute({
         "namespace": NAMESPACE,
         "top_k": top_k,
-        "score_by": [{"type": "text", "field": field, "query": q}],
+        "score_by": [{"type": "text", "fields": [field], "query": q}],
         "include_fields": INCLUDE_FIELDS,
     })
 
@@ -187,12 +187,12 @@ def search_text_multi(
     """
     if isinstance(queries, str):
         clauses = [
-            {"type": "text", "field": f, "query": queries}
+            {"type": "text", "fields": [f], "query": queries}
             for f in _MULTI_FIELDS
         ]
     else:
         clauses = [
-            {"type": "text", "field": f, "query": q.strip()}
+            {"type": "text", "fields": [f], "query": q.strip()}
             for f, q in queries.items()
             if q and q.strip()
         ]
