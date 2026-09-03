@@ -193,6 +193,72 @@ def embed_image_with_retry(pil_image: Image.Image) -> list[float]:
     raise last_exc
 
 
+# Pinecone's `body` field (full_text_search) rejects documents over 10,000
+# tokens or 100,000 bytes. A handful of long Wikipedia articles (large
+# raptors/owls) blow past both at full-corpus scale, failing their whole
+# upsert batch. Word count is a conservative under-estimate of token count
+# for English prose (BPE tokenizers split subwords/punctuation into extra
+# tokens), so capping well below the word-count equivalent of the token
+# limit keeps real token counts under it too.
+MAX_BODY_WORDS = 7_000
+MAX_BODY_BYTES = 90_000
+
+
+def truncate_body(body: str) -> str:
+    """Trim ``body`` on paragraph boundaries to stay under Pinecone's field
+    limits, with a hard byte-level cut as a backstop for any single
+    oversized paragraph.
+
+    KNOWN LIMITATION: this discards content rather than losing zero data.
+    As of the full 2,155-bird corpus, ~10 birds (large raptors/owls, e.g.
+    Cooper's hawk at 23k words) exceed MAX_BODY_WORDS and get cut to their
+    first ~7,000 words — for Cooper's hawk that's ~70% of the article
+    dropped from what's searchable/stored in Pinecone. The full original
+    text is untouched on disk at parsed_birds/text/<slug>.txt; only the
+    copy indexed here is trimmed. Only the `body` FTS field is affected —
+    `image_embedding` (the cross-modal visual search) is untouched either
+    way, and 99.5% of the corpus never hits this cap at all.
+
+    TODO(chunking): the complete fix is to split an oversized `body` into
+    multiple Pinecone documents per bird instead of truncating one, e.g.
+    `_id`s `slug` (chunk 0, carries `bird_name` + `intro` + `image_embedding`
+    as today), `slug#1`, `slug#2`, ... (continuation chunks, `body` only).
+    Chunk on paragraph boundaries at the same ~7,000-word target, carrying
+    the last 1-2 paragraphs of chunk N forward into chunk N+1 so a phrase
+    that straddles a chunk seam doesn't silently stop matching
+    search_text_phrase / query_string slop queries (plain token-OR search
+    doesn't need this — it's boundary-agnostic).
+
+    Trade-off: this isn't a build_index.py-only change. query.py's shared
+    `_execute()` (used by every search_* helper) would need a dedup pass —
+    group returned matches by parent slug (`match.id.split("#")[0]`) and
+    keep the top-scoring chunk per bird — since a naive multi-doc-per-bird
+    schema would otherwise let one bird occupy multiple slots in a top_k
+    result list. That dedup is a no-op for the 99.5% of documents with no
+    `#` suffix, so it's low-risk, but it is new shared logic every search
+    mode would depend on. It also does not fully close the gap: in Combined
+    mode (search_filter_visual), the required-keyword filter and the
+    image-vector rerank must hit the *same* document, and only chunk 0 has
+    `image_embedding` — so a required term living only in chunk 2+ still
+    wouldn't surface a bird in Combined mode, chunking or not. Only the
+    plain Text-FTS tabs would gain full-corpus coverage from chunking.
+    """
+    paragraphs = body.split("\n\n")
+    kept: list[str] = []
+    word_count = 0
+    for p in paragraphs:
+        pw = len(p.split())
+        if kept and word_count + pw > MAX_BODY_WORDS:
+            break
+        kept.append(p)
+        word_count += pw
+    truncated = "\n\n".join(kept)
+    encoded = truncated.encode("utf-8")
+    if len(encoded) > MAX_BODY_BYTES:
+        truncated = encoded[:MAX_BODY_BYTES].decode("utf-8", errors="ignore")
+    return truncated
+
+
 def load_embedding_cache(path: pathlib.Path) -> dict[str, list[float]]:
     """Read the JSONL cache and return ``{slug: embedding}`` for rows whose
     ``model`` and ``dim`` match the current config. Stale rows (different
@@ -330,6 +396,7 @@ def build_document(
     text_path = data_dir / "text" / entry["text_file"]
     text = text_path.read_text(encoding="utf-8")
     intro, body = split_intro_body(text)
+    body = truncate_body(body)
 
     return {
         "_id": slug,
