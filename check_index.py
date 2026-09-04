@@ -12,7 +12,7 @@ import pathlib
 
 from query import pc, INDEX, NAMESPACE
 
-idx = pc.preview.index(name=INDEX)
+idx = pc.index(name=INDEX)
 
 cache_path = pathlib.Path(__file__).resolve().parent / "embeddings-cache.jsonl"
 expected: set[str] = set()

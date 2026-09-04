@@ -1,6 +1,6 @@
 """Bird Search v2 — ingestion pipeline.
 
-Builds a Pinecone preview FTS index over a sample of the parsed Wikipedia bird
+Builds a Pinecone FTS index over a sample of the parsed Wikipedia bird
 corpus, with three full-text fields (bird_name, intro, body) and one dense
 vector field (image_embedding) populated from Gemini Embedding 2 over each
 bird's primary image.
@@ -41,8 +41,7 @@ load_dotenv()
 from PIL import Image
 from tqdm import tqdm
 
-from pinecone import Pinecone
-from pinecone.preview import SchemaBuilder
+from pinecone import Pinecone, SchemaBuilder
 
 from google import genai
 from google.genai import types as genai_types
@@ -367,19 +366,19 @@ def build_schema(embed_dim: int):
 
 
 def ensure_index(embed_dim: int, recreate: bool) -> None:
-    if pc.preview.indexes.exists(INDEX):
+    if pc.indexes.exists(INDEX):
         if recreate:
             print(f"Deleting existing index '{INDEX}'...")
-            pc.preview.indexes.delete(INDEX)
+            pc.indexes.delete(INDEX)
             # Wait until it's actually gone before recreating.
-            while pc.preview.indexes.exists(INDEX):
+            while pc.indexes.exists(INDEX):
                 time.sleep(2)
         else:
             print(f"Index '{INDEX}' already exists. (Pass --recreate to drop.)")
             return
 
     schema = build_schema(embed_dim)
-    pc.preview.indexes.create(name=INDEX, schema=schema)
+    pc.indexes.create(name=INDEX, schema=schema)
     print(f"Created index '{INDEX}'.")
 
 
@@ -387,7 +386,7 @@ def wait_until_ready(timeout_s: int = 300) -> None:
     print(f"Waiting for index '{INDEX}' to become ready...")
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        info = pc.preview.indexes.describe(INDEX)
+        info = pc.indexes.describe(INDEX)
         if info.status.ready:
             print(f"Index is ready (state={info.status.state!r}).")
             return
@@ -499,7 +498,7 @@ def main() -> None:
     if args.recreate:
         ensure_index(embed_dim=GEMINI_EMBED_DIMENSIONS, recreate=True)
         wait_until_ready()
-    elif not pc.preview.indexes.exists(INDEX):
+    elif not pc.indexes.exists(INDEX):
         raise SystemExit(
             f"Index '{INDEX}' does not exist. Run "
             f"`python build_index.py --create-only` first, then re-run this "
@@ -518,7 +517,7 @@ def main() -> None:
     fill_embedding_cache(slugs, meta, data_dir, cache)
 
     # ---- Build docs (text load is cheap; embeddings come from cache) --------
-    idx = pc.preview.index(name=INDEX)
+    idx = pc.index(name=INDEX)
 
     docs: list[dict[str, Any]] = []
     skipped = 0
