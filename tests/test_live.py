@@ -1,5 +1,6 @@
-"""Live integration tests — every example in ``demo-queries.md`` against
-the real ``bird-search-fts`` index.
+"""Live integration tests — request-shape and response-signal checks for a
+curated set of bird-search demo queries against the real ``bird-search-fts``
+index.
 
 Each test does two things:
 1. **Asserts request shape** on ``result.kwargs`` so an SDK bump that
@@ -205,8 +206,8 @@ def test_visual_iridescent_hummingbird(live_index):
 # ===========================================================================
 
 def test_visual_red_black_demo_flip_precondition(live_index):
-    """The 'Bonus' beat in demo-queries.md hinges on most of the visual
-    top-10 for `red bird with black wings` *not* mentioning Illinois — so
+    """The demo's 'Bonus' beat hinges on most of the visual top-10 for
+    `red bird with black wings` *not* mentioning Illinois — so
     that switching on the `$match_all: "illinois"` filter visibly
     rearranges the leaderboard. This test pins that pre-condition: at
     most 3 of the top-10 visual hits should have 'illinois' in their
