@@ -1,6 +1,6 @@
 """Streamlit UI for Bird Search v2.
 
-Four search modes over one Pinecone preview FTS index:
+Four search modes over one Pinecone FTS index:
   - Text FTS: BM25 token-OR over ``bird_name`` / ``intro`` / ``body``, either
     per-field or blended (``multi``). The blended mode also supports
     different queries per field (e.g. bird_name=swallow + body=mountains).
@@ -451,7 +451,7 @@ st.markdown(
 
 | Tab | API shape | Pick when… | Canonical example |
 |---|---|---|---|
-| **Text FTS** | `score_by=[{"type": "text", "field": …}]` (or `query_string` when phrase ON) | You can name a token in the article. Use `multi` with per-field queries to combine signals. | `Mormon crickets` (body) → California gull |
+| **Text FTS** | `score_by=[{"type": "text", "fields": […]}]` (or `query_string` when phrase ON) | You can name a token in the article. Use `multi` with per-field queries to combine signals. | `Mormon crickets` (body) → California gull |
 | **Visual** | `score_by=[{"type": "dense_vector", "field": "image_embedding"}]` | You can describe the bird's appearance but not the article's vocabulary. | `tall pink wading bird with long curved neck` → American flamingo |
 | **Lucene** | `score_by=[{"type": "query_string"}]` (raw Lucene) | You need boosts, slop, phrase prefixes, exclusions, or cross-field clauses. | `body:(eagle^3 OR hawk OR raptor)` → eagles dominate |
 | **Combined** | `filter={"body": {"$match_all": …}}` + dense `score_by` | You need both — a hard text gate and visual rerank. | `swoop, illinois` + `black bird with bright spots on wings` → Red-winged blackbird |

@@ -40,7 +40,7 @@ def _fresh_query_module(search_matches=None):
     fake_idx.documents.search = fake_search
 
     fake_pc = mock.MagicMock()
-    fake_pc.preview.index.return_value = fake_idx
+    fake_pc.index.return_value = fake_idx
 
     fake_embedding = mock.MagicMock()
     fake_embedding.values = [0.1, 0.2, 0.3]
@@ -84,7 +84,7 @@ def test_search_text_builds_single_field_score_by():
     assert kwargs["namespace"] == "birds"
     assert kwargs["top_k"] == 7
     assert kwargs["score_by"] == [
-        {"type": "text", "field": "body", "query": "woodpecker"}
+        {"type": "text", "fields": ["body"], "query": "woodpecker"}
     ]
     assert kwargs["include_fields"] == ["bird_name", "intro", "body"]
     # SearchResult contract: kwargs round-tripped, code populated.
@@ -98,7 +98,7 @@ def test_search_text_multi_blends_three_fields():
     result = query.search_text_multi("red wings", top_k=5)
     _, kwargs = fake_search.call_args
     assert kwargs["top_k"] == 5
-    fields = [s["field"] for s in kwargs["score_by"]]
+    fields = [s["fields"][0] for s in kwargs["score_by"]]
     assert fields == ["bird_name", "intro", "body"]
     assert all(s["type"] == "text" and s["query"] == "red wings" for s in kwargs["score_by"])
     assert "score_by" in result.code
@@ -116,9 +116,9 @@ def test_search_text_multi_per_field_dict_emits_one_clause_per_field():
     assert kwargs["top_k"] == 4
     # `intro` is whitespace-only → skipped. Only bird_name + body should fire.
     clauses = kwargs["score_by"]
-    assert [c["field"] for c in clauses] == ["bird_name", "body"]
+    assert [c["fields"][0] for c in clauses] == ["bird_name", "body"]
     assert all(c["type"] == "text" for c in clauses)
-    by_field = {c["field"]: c["query"] for c in clauses}
+    by_field = {c["fields"][0]: c["query"] for c in clauses}
     assert by_field == {"bird_name": "swallow", "body": "in mountains"}
 
 
