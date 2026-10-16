@@ -372,11 +372,36 @@ st.markdown(
     white-space: nowrap;
 }
 
-/* <mark> highlights — softer than browser yellow. */
+/* <mark> highlights — softer than browser yellow. Text forced dark since
+   a light-yellow chip reads best with dark text in either theme. */
 mark {
     background: rgba(255, 213, 79, 0.45);
+    color: rgba(49, 51, 63, 0.95);
     padding: 0 0.1rem;
     border-radius: 2px;
+}
+
+/* Streamlit doesn't expose its active theme as CSS custom properties, so
+   dark-mode support for the hardcoded colors above follows the OS-level
+   preference directly (this matches Streamlit's own default "Use system
+   setting" theme, though not a manual in-app override away from it). */
+@media (prefers-color-scheme: dark) {
+    .stButton > button[kind="secondary"] {
+        border-color: rgba(250, 250, 250, 0.18);
+        color: rgba(250, 250, 250, 0.78);
+    }
+    .stButton > button[kind="secondary"]:hover {
+        background: rgba(250, 250, 250, 0.08);
+        border-color: rgba(250, 250, 250, 0.32);
+        color: rgba(250, 250, 250, 1);
+    }
+    .bird-card-title {
+        color: rgba(250, 250, 250, 0.95);
+    }
+    .bird-card-score {
+        background: rgba(250, 250, 250, 0.12);
+        color: rgba(250, 250, 250, 0.78);
+    }
 }
 </style>
     """,
